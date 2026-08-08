@@ -1,0 +1,54 @@
+name: dp
+channels:
+  - conda-forge
+channel_priority: strict
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
+
+  # Core numerical and image processing
+  - numpy
+  - scipy
+  - pillow
+  - opencv
+  - scikit-image
+  - imageio
+
+  # Geometry and OCR-region processing
+  - shapely
+  - pyclipper
+
+  # CLI, configuration, validation, and reporting
+  - pyyaml
+  - pydantic
+  - typer
+  - rich
+  - tqdm
+  - requests
+  - jsonschema
+
+  # Testing and code quality
+  - pytest
+  - pytest-cov
+
+  # Packages whose current wheels are better maintained through pip
+  - pip:
+      # PyTorch CUDA 12.6 wheel from official index
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch==2.12.1
+      # Translation engine
+      - transformers
+      - sentencepiece
+      - sacremoses
+      - huggingface-hub
+      # Standalone translation API
+      - fastapi
+      - uvicorn[standard]
+      # Existing dependencies
+      - paddlepaddle==3.2.0
+      - paddleocr>=3.3,<4
+      - rapidfuzz>=3.9
+      - ftfy>=6.2
+      - regex>=2024.7

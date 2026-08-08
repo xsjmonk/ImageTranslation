@@ -1,0 +1,25 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8091,
+    "workers": 1,
+    "log_level": "info"
+  },
+  "translation": {
+    "model_name": "facebook/m2m100_418M",
+    "source_language": "zh",
+    "target_language": "en",
+    "device": "cuda",
+    "cuda_device": 0,
+    "allow_cpu_fallback": false,
+    "precision": "auto",
+    "batch_size": 8,
+    "max_input_characters": 4000,
+    "generation": {
+      "max_new_tokens": 256,
+      "num_beams": 4,
+      "length_penalty": 1.0,
+      "early_stopping": true
+    }
+  }
+}

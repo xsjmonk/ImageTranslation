@@ -1,0 +1,57 @@
+{
+  "general": {
+    "continue_on_error": true
+  },
+  "input": {
+    "recursive": false,
+    "extensions": [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".webp",
+      ".bmp",
+      ".tif",
+      ".tiff"
+    ]
+  },
+  "ocr": {
+    "enabled": true,
+    "engine": "paddleocr",
+    "source_language": "zh",
+    "min_confidence": 0.65,
+    "detect_rotation": true
+  },
+  "translation": {
+    "enabled": true,
+    "source_language": "zh-CN",
+    "target_language": "en-US",
+    "preserve_already_target_language": true,
+    "default_action": "translate",
+    "preserve_terms": [],
+    "preserve_patterns": []
+  },
+  "imaging": {
+    "enabled": true,
+    "processor": "hybrid",
+    "mask_expansion_pixels": 3,
+    "preserve_original_dimensions": true
+  },
+  "revision": {
+    "enabled": true,
+    "preserve_rotation": true,
+    "use_source_polygon": true,
+    "allow_multiline": true,
+    "minimum_font_size": 12
+  },
+  "output": {
+    "suffix": "_processed",
+    "preserve_filename": true,
+    "overwrite_existing": false,
+    "save_metadata": true,
+    "save_masks": true,
+    "save_cleaned_images": true
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}
