@@ -1,0 +1,22 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+x64/
+x86/
+Debug/
+Release/
+Build/
+Prompts/
+.reasonix
+.pytest_cache
+.git
+
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+

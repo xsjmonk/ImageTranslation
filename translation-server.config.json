@@ -5,6 +5,9 @@
     "workers": 1,
     "log_level": "info"
   },
+  "runtime": {
+    "warmup_on_start": true
+  },
   "translation": {
     "model_name": "facebook/m2m100_418M",
     "source_language": "zh",
@@ -17,7 +20,7 @@
     "max_input_characters": 4000,
     "generation": {
       "max_new_tokens": 256,
-      "num_beams": 4,
+      "num_beams": 1,
       "length_penalty": 1.0,
       "early_stopping": true
     }

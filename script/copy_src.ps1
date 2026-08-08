@@ -30,14 +30,14 @@ Write-Host "[INFO] Repo root:   $RepoRoot"
 Write-Host "[INFO] Working dir: $(Get-Location)"
 Write-Host "[INFO] Copy to:     $DestDir"
 
-# ---- Safety: refuse to overwrite an existing copy/zip ----
+# ---- Clean previous copy/zip (idempotent re-runs) ----
 if (Test-Path $DestDir) {
-    Write-Error "Destination already exists: $DestDir — remove it first."
-    exit 1
+    Write-Host "[WARN] Removing existing destination: $DestDir"
+    Remove-Item -Path $DestDir -Recurse -Force
 }
 if (Test-Path $ZipPath) {
-    Write-Error "Zip already exists: $ZipPath — remove it first."
-    exit 1
+    Write-Host "[WARN] Removing existing zip: $ZipPath"
+    Remove-Item -Path $ZipPath -Force
 }
 
 # ---- Copy repo (keep structure, exclude noise) ----
@@ -55,6 +55,11 @@ Write-Host "[INFO] Copying repo..."
 foreach ($item in Get-ChildItem -Path $RepoRoot -Force) {
     if ($ExcludeDirs -contains $item.Name) {
         Write-Host "[SKIP] $($item.Name)"
+        continue
+    }
+    # Never copy the destination into itself (happens when run from repo root)
+    if ($item.FullName -eq $DestDir) {
+        Write-Host "[SKIP] $($item.Name) (destination)"
         continue
     }
     Copy-Item -Path $item.FullName -Destination $DestDir -Recurse -Force

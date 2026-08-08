@@ -136,7 +136,11 @@ function Read-EnvironmentYaml {
             # Pip entries are indented further under "- pip:"
             if ($trimmed -match '^-\s+(.+)$') {
                 $dep = $Matches[1].Trim()
-                if ($dep -and -not $dep.StartsWith('#')) {
+                # Skip comments AND pip option/directive lines (e.g.
+                # "--extra-index-url https://..."). These are passed through
+                # to pip by conda but are NOT installable packages, so they
+                # must not be validated as installed dependencies.
+                if ($dep -and -not $dep.StartsWith('#') -and -not $dep.StartsWith('-')) {
                     $pipDeps += $dep
                 }
             }
@@ -165,10 +169,17 @@ function Read-EnvironmentYaml {
 #   "python=3.10"        -> Name=python, Constraint="=3.10"
 #   "paddlepaddle==3.2.0" -> Name=paddlepaddle, Constraint="==3.2.0"
 #   "paddleocr>=3.3,<4"   -> Name=paddleocr, Constraint=">=3.3,<4"
+#   "uvicorn[standard]"   -> Name=uvicorn, Constraint=""
 #   "numpy"               -> Name=numpy, Constraint=""
 # ----------------------------------------------------------
 function Parse-Dependency {
     param([string]$Dep)
+
+    # Strip pip extras: "uvicorn[standard]" -> "uvicorn", keep any
+    # constraint that follows the extras: "pkg[extra]==1.0" -> "pkg==1.0"
+    if ($Dep -match '^([^\[]+)(\[[^\]]*\])?(.*)$') {
+        $Dep = $Matches[1] + $Matches[3]
+    }
 
     if ($Dep -match '^([a-zA-Z0-9_][a-zA-Z0-9_.-]*?)\s*([=><!].*)$') {
         return @{ Name = $Matches[1]; Constraint = $Matches[2] }
@@ -235,6 +246,9 @@ function Test-VersionConstraint {
     param([string]$Installed, [string]$Constraint)
 
     if (-not $Constraint) { return $true }
+
+    # PEP 440 local version suffix: "2.12.1+cu126" compares as "2.12.1"
+    $Installed = ($Installed -split '\+')[0]
 
     $parts = $Constraint -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 

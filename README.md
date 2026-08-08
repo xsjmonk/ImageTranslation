@@ -123,14 +123,31 @@ A standalone FastAPI server exposes the M2M100 zh→en translator over HTTP.
 .\script\Start-TranslationServer.ps1
 ```
 
-With explicit config:
+With explicit config (relative paths resolve from the current directory):
 
 ```powershell
-.\script\script\Start-TranslationServer.ps1 -Config ".\translation-server.config.json"
+.\script\Start-TranslationServer.ps1 -Config ".\translation-server.config.json"
 ```
 
 The first launch downloads the model (~1.7 GB). Subsequent starts are fast.  
 **Requires NVIDIA CUDA GPU** — defaults to `cuda:0` with no CPU fallback.
+
+### Runtime configuration
+
+`translation-server.config.json`:
+
+```json
+"runtime": {
+  "warmup_on_start": true
+}
+```
+
+- `warmup_on_start: true` (default) — model loads before the API becomes ready; startup fails if the model cannot load.
+- `warmup_on_start: false` — model loads lazily on the first `/translate` request; `/health` reports `"status": "starting", "ready": false` until then.
+
+### Long-running requests
+
+Translation may take several seconds. The HTTP request stays open until inference completes — there is **no server-side timeout**. GPU inference runs in the threadpool and never blocks the event loop, so `/health` stays responsive. Callers must use a sufficiently long HTTP client timeout (PowerShell's `Invoke-RestMethod` waits by default).
 
 ### API
 
@@ -146,7 +163,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8091/health' -Method Get
 Invoke-RestMethod -Uri 'http://127.0.0.1:8091/translate' -Method Post -ContentType 'application/json; charset=utf-8' -Body (@{ text='加厚防水面料' } | ConvertTo-Json)
 ```
 
-Response: `{"translation": "Thickened waterproof fabric"}`
+Response: `{"translation": "Increased waterproof."}`
+
+Errors are JSON envelopes (`{"error": "..."}`): invalid input → 400, translator/model unavailable → 503, unexpected failure → 500.
 
 ### Smoke test (direct module, no HTTP)
 
