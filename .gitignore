@@ -19,4 +19,4 @@ Prompts/
 *.VC.db
 *.VC.VC.opendb
 
-
+*.pyc
