@@ -20,3 +20,6 @@ Prompts/
 *.VC.VC.opendb
 
 *.pyc
+*.pyo
+*.pyd
+__pycache__/
