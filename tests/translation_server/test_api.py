@@ -1,20 +1,33 @@
-"""Tests for translation_server FastAPI app — uses mocked translator."""
+"""Tests for translation_server FastAPI app — uses mocked translators."""
 
 from __future__ import annotations
+
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from image_translation.translation.base import Translator
+from image_translation.translation.exceptions import (
+    TranslationDeviceError,
+    TranslationInputError,
+    TranslationModelLoadError,
+)
 from image_translation.translation.models import TranslationResult, TranslationRuntimeInfo
+from image_translation.translation.text_utils import preprocess
 
 
 # ---------------------------------------------------------------------------
-# Fake translator for testing
+# Fake translators for testing
 # ---------------------------------------------------------------------------
 
 class FakeTranslator(Translator):
     """Returns canned translations — no GPU needed."""
+
+    def __init__(self, ready: bool = True, max_input_characters: int = 4000) -> None:
+        self._ready = ready
+        self._max = max_input_characters
 
     @property
     def name(self) -> str:
@@ -27,17 +40,16 @@ class FakeTranslator(Translator):
             device="cpu",
             precision="float32",
             cuda_available=False,
-            ready=True,
+            ready=self._ready,
         )
 
     def translate_text(
         self, text: str, source_lang: str = "zh", target_lang: str = "en"
     ) -> TranslationResult:
-        if not text or not text.strip():
-            raise ValueError("Input text must not be empty")
+        cleaned = preprocess(text, max_characters=self._max)
         return TranslationResult(
-            source_text=text,
-            translated_text=f"[EN] {text}",
+            source_text=cleaned,
+            translated_text=f"[EN] {cleaned}",
             source_language=source_lang,
             target_language=target_lang,
             model_name="fake",
@@ -53,22 +65,43 @@ class FakeTranslator(Translator):
         pass
 
 
+class SlowTranslator(FakeTranslator):
+    """Deliberately blocks for a short time to simulate GPU inference."""
+
+    def __init__(self, delay: float = 0.5) -> None:
+        super().__init__()
+        self._delay = delay
+
+    def translate_text(self, text, source_lang="zh", target_lang="en"):
+        time.sleep(self._delay)
+        return super().translate_text(text, source_lang, target_lang)
+
+
 # ---------------------------------------------------------------------------
-# Test app
+# App factory helpers
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def client():
+def _make_client(runtime_translator):
     from translation_server.runtime import TranslationRuntime, TranslationServerConfig
     from translation_server.app import create_app
 
     config = TranslationServerConfig()
+    config.runtime.warmup_on_start = False
     runtime = TranslationRuntime(config)
-    runtime._translator = FakeTranslator()
+    runtime._translator = runtime_translator
 
     app = create_app(runtime)
     return TestClient(app)
 
+
+@pytest.fixture
+def client():
+    return _make_client(FakeTranslator())
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 
 class TestHealth:
     def test_health_ok(self, client):
@@ -84,6 +117,18 @@ class TestHealth:
         assert "model" in data
         assert "device" in data
 
+    def test_health_not_ready_reports_starting(self):
+        c = _make_client(FakeTranslator(ready=False))
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "starting"
+        assert data["ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# Translate — JSON contract
+# ---------------------------------------------------------------------------
 
 class TestTranslate:
     def test_translate_chinese(self, client):
@@ -103,39 +148,101 @@ class TestTranslate:
         data = resp.json()
         assert "translation" in data
 
-    def test_empty_text_400(self, client):
-        resp = client.post("/translate", json={"text": ""})
-        assert resp.status_code == 422  # pydantic validation
+    def test_response_contains_exactly_translation(self, client):
+        resp = client.post("/translate", json={"text": "测试"})
+        assert resp.status_code == 200
+        assert set(resp.json().keys()) == {"translation"}
+
+    def test_whitespace_only_400(self, client):
+        resp = client.post("/translate", json={"text": "   "})
+        assert resp.status_code == 400
+        assert "error" in resp.json()
 
     def test_missing_text_422(self, client):
         resp = client.post("/translate", json={})
         assert resp.status_code == 422
 
-    def test_response_contains_only_translation(self, client):
-        resp = client.post("/translate", json={"text": "测试"})
-        data = resp.json()
-        # Only the public field, not internal model details
-        assert set(data.keys()) == {"translation"}
+    def test_too_long_400(self):
+        """Length limit comes from configured translator max, not the API model."""
+        c = _make_client(FakeTranslator(max_input_characters=10))
+        resp = c.post("/translate", json={"text": "x" * 50})
+        assert resp.status_code == 400
+        assert "error" in resp.json()
+
+    def test_malformed_json_422(self, client):
+        resp = client.post("/translate", data="{not json", headers={"Content-Type": "application/json"})
+        assert resp.status_code == 422
 
 
-class TestUnavailableTranslator:
-    def test_503_when_translator_unavailable(self):
-        """If the translator raises during translate, the API returns 503."""
-        from translation_server.runtime import TranslationRuntime, TranslationServerConfig
-        from translation_server.app import create_app
+# ---------------------------------------------------------------------------
+# Error semantics: 503 vs 500
+# ---------------------------------------------------------------------------
 
-        config = TranslationServerConfig()
-        runtime = TranslationRuntime(config)
-
-        # Inject a broken translator that fails on translate_text
-        class BrokenTranslator(FakeTranslator):
+class TestErrorSemantics:
+    def test_device_unavailable_503(self):
+        class DeviceFailTranslator(FakeTranslator):
             def translate_text(self, text, source_lang="zh", target_lang="en"):
-                raise RuntimeError("Model not loaded")
+                raise TranslationDeviceError("CUDA unavailable")
 
-        runtime._translator = BrokenTranslator()
+        c = _make_client(DeviceFailTranslator())
+        resp = c.post("/translate", json={"text": "你好"})
+        assert resp.status_code == 503
+        assert "error" in resp.json()
+        assert "CUDA" not in resp.json()["error"]  # no internals leaked
 
-        app = create_app(runtime)
-        client = TestClient(app)
+    def test_model_load_failure_503(self):
+        class ModelFailTranslator(FakeTranslator):
+            def translate_text(self, text, source_lang="zh", target_lang="en"):
+                raise TranslationModelLoadError("model weights missing")
 
-        resp = client.post("/translate", json={"text": "你好"})
+        c = _make_client(ModelFailTranslator())
+        resp = c.post("/translate", json={"text": "你好"})
+        assert resp.status_code == 503
+
+    def test_unexpected_error_500(self):
+        class CrashTranslator(FakeTranslator):
+            def translate_text(self, text, source_lang="zh", target_lang="en"):
+                raise RuntimeError("boom: internal detail")
+
+        c = _make_client(CrashTranslator())
+        resp = c.post("/translate", json={"text": "你好"})
         assert resp.status_code == 500
+        data = resp.json()
+        assert "error" in data
+        assert "boom" not in data["error"]  # no raw exception leaked
+
+
+# ---------------------------------------------------------------------------
+# Long-running inference must not block the event loop
+# ---------------------------------------------------------------------------
+
+class TestLongRunningInference:
+    def test_translate_waits_and_returns_200(self):
+        c = _make_client(SlowTranslator(delay=0.5))
+        start = time.monotonic()
+        resp = c.post("/translate", json={"text": "你好"})
+        elapsed = time.monotonic() - start
+
+        assert resp.status_code == 200
+        assert set(resp.json().keys()) == {"translation"}
+        assert elapsed >= 0.4  # it actually waited for inference
+
+    def test_health_responsive_during_translation(self):
+        c = _make_client(SlowTranslator(delay=1.0))
+        results: dict = {}
+        done = threading.Event()
+
+        def do_translate():
+            results["translate"] = c.post("/translate", json={"text": "你好"})
+            done.set()
+
+        t = threading.Thread(target=do_translate, daemon=True)
+        t.start()
+        time.sleep(0.2)  # let translation start sleeping
+
+        health = c.get("/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+
+        done.wait(timeout=5)
+        assert results["translate"].status_code == 200

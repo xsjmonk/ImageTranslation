@@ -1,9 +1,9 @@
 """GPU integration test — requires CUDA, downloads M2M100 model (~1.7 GB).
 
 Excluded from default unit suite. Run explicitly:
-    pytest tests/translation/smoke_test.py -v -s
+    python tests/translation/smoke_test.py
 Or:
-    pytest -m gpu -v -s
+    pytest tests/translation/smoke_test.py -v -s
 """
 
 import pytest
@@ -34,11 +34,21 @@ def test_m2m100_real_gpu_translation():
 
     r2 = t.translate_text("加厚防水面料")
     assert r2.translated_text, "Empty translation for 加厚防水面料"
+    assert r2.translated_text != "加厚防水面料"
     print(f"加厚防水面料 -> {r2.translated_text}")
 
     info = t.runtime_info
     assert info.ready
     assert info.cuda_available
+    assert info.device.startswith("cuda:")
     print(f"Model: {info.model_name}")
     print(f"Device: {info.device}")
     print(f"GPU: {info.gpu_name}")
+
+
+if __name__ == "__main__":
+    if not _CUDA_OK:
+        print("SKIP: NVIDIA CUDA GPU required")
+        raise SystemExit(2)
+    test_m2m100_real_gpu_translation()
+    print("GPU smoke test passed.")

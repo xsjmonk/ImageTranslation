@@ -5,13 +5,21 @@ from __future__ import annotations
 import pytest
 
 from image_translation.translation.config import TranslationConfig, GenerationConfig
-from image_translation.translation.models import TranslationRequest, TranslationResult, TranslationRuntimeInfo
+from image_translation.translation.exceptions import (
+    TranslationDeviceError,
+    TranslationInputError,
+)
+from image_translation.translation.models import (
+    TranslationRequest,
+    TranslationResult,
+    TranslationRuntimeInfo,
+)
 from image_translation.translation.text_utils import preprocess
 from image_translation.translation.factory import create_translator
 
 
 # ---------------------------------------------------------------------------
-# Text preprocessing
+# Text preprocessing (minimal, conservative)
 # ---------------------------------------------------------------------------
 
 class TestPreprocess:
@@ -22,25 +30,25 @@ class TestPreprocess:
         assert preprocess("  你好  ") == "你好"
 
     def test_reject_none(self):
-        with pytest.raises(ValueError, match="None"):
+        with pytest.raises(TranslationInputError, match="None"):
             preprocess(None)
 
     def test_reject_empty(self):
-        with pytest.raises(ValueError, match="empty"):
+        with pytest.raises(TranslationInputError, match="empty"):
             preprocess("")
 
     def test_reject_whitespace_only(self):
-        with pytest.raises(ValueError, match="empty"):
+        with pytest.raises(TranslationInputError, match="empty"):
             preprocess("   \n  ")
 
     def test_reject_oversized(self):
-        with pytest.raises(ValueError, match="maximum length"):
+        with pytest.raises(TranslationInputError, match="maximum length"):
             preprocess("x" * 5000, max_characters=4000)
 
-    def test_unicode_normalization(self):
-        # Non-breaking space → normal space
-        result = preprocess("hello\u00a0world")
-        assert "\u00a0" not in result
+    def test_content_preserved(self):
+        """NFKC is NOT applied — compatibility characters stay untouched."""
+        assert preprocess("① ② ③") == "① ② ③"
+        assert preprocess("hello\u00a0world") == "hello\u00a0world"
 
     def test_line_break_normalization(self):
         result = preprocess("line1\r\nline2\rline3")
@@ -110,6 +118,10 @@ class TestTranslationConfig:
         with pytest.raises(ValueError, match="device"):
             TranslationConfig(device="tpu")
 
+    def test_invalid_cuda_device_negative(self):
+        with pytest.raises(ValueError, match="cuda_device"):
+            TranslationConfig(cuda_device=-1)
+
     def test_generation_config_defaults(self):
         gen = GenerationConfig()
         assert gen.max_new_tokens == 256
@@ -134,3 +146,110 @@ class TestFactory:
         cfg = TranslationConfig(model_name="unknown/model")
         with pytest.raises(ValueError, match="Unknown translation engine"):
             create_translator(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Device resolution (CUDA required, CPU fallback logic)
+# ---------------------------------------------------------------------------
+
+class TestDeviceResolution:
+    def _make_translator(self, **kwargs):
+        from image_translation.translation.m2m100_translator import M2M100Translator
+        return M2M100Translator(TranslationConfig(**kwargs))
+
+    def test_cuda_required_raises_when_unavailable(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        t = self._make_translator(device="cuda", allow_cpu_fallback=False)
+        with pytest.raises(TranslationDeviceError, match="CUDA is required"):
+            t._resolve_device()
+
+    def test_no_cpu_fallback_when_disabled(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        t = self._make_translator(device="cuda", allow_cpu_fallback=False)
+        with pytest.raises(TranslationDeviceError):
+            t._resolve_device()
+
+    def test_cpu_fallback_uses_cpu(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        t = self._make_translator(device="cuda", allow_cpu_fallback=True)
+        assert t._resolve_device() == "cpu"
+
+    def test_requested_cpu_uses_cpu(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        t = self._make_translator(device="cpu")
+        assert t._resolve_device() == "cpu"
+
+    def test_cuda_device_index_validation(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+        t = self._make_translator(device="cuda", cuda_device=5)
+        with pytest.raises(TranslationDeviceError, match="Invalid CUDA device index"):
+            t._resolve_device()
+
+    def test_cuda_device_index_ok(self, monkeypatch):
+        import torch
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+        t = self._make_translator(device="cuda", cuda_device=1)
+        assert t._resolve_device() == "cuda:1"
+
+    def test_float16_on_cpu_rejected(self):
+        from image_translation.translation.exceptions import TranslationConfigurationError
+        from image_translation.translation.m2m100_translator import M2M100Translator
+        t = M2M100Translator(TranslationConfig(device="cpu", precision="float16"))
+        with pytest.raises(TranslationConfigurationError, match="float16"):
+            t._load_model()
+
+
+# ---------------------------------------------------------------------------
+# Batch translation: real chunked GPU batching, order preserved
+# ---------------------------------------------------------------------------
+
+class TestBatchTranslation:
+    def test_batch_chunks_and_preserves_order(self, monkeypatch):
+        from image_translation.translation.m2m100_translator import M2M100Translator
+
+        t = M2M100Translator(TranslationConfig(batch_size=2))
+        # Fake a loaded model so _translate_impl is reached
+        t._model = object()
+        t._tokenizer = object()
+        t._device_str = "cpu"
+
+        calls: list[list[str]] = []
+
+        def fake_impl(texts, source_lang, target_lang):
+            calls.append(list(texts))
+            return [
+                TranslationResult(
+                    source_text=x,
+                    translated_text=f"EN:{x}",
+                    source_language=source_lang,
+                    target_language=target_lang,
+                    model_name="m2m100",
+                    device="cpu",
+                )
+                for x in texts
+            ]
+
+        monkeypatch.setattr(t, "_translate_impl", fake_impl)
+
+        texts = ["a", "b", "c", "d", "e"]
+        results = t.translate_batch_texts(texts)
+
+        # Chunked: [a,b], [c,d], [e]
+        assert calls == [["a", "b"], ["c", "d"], ["e"]]
+        # Order preserved
+        assert [r.source_text for r in results] == texts
+        assert [r.translated_text for r in results] == [
+            "EN:a", "EN:b", "EN:c", "EN:d", "EN:e",
+        ]
+
+    def test_batch_empty(self):
+        from image_translation.translation.m2m100_translator import M2M100Translator
+        t = M2M100Translator(TranslationConfig())
+        assert t.translate_batch_texts([]) == []

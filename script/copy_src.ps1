@@ -73,6 +73,13 @@ Get-ChildItem -Path $DestDir -Recurse -Directory -Filter '__pycache__' -Force |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---- Zip the copy ----
+# Compress-Archive fails if the destination already exists; delete it
+# defensively right before compressing (belt-and-suspenders with the
+# cleanup at the top, in case a stale zip appeared in between).
+if (Test-Path $ZipPath) {
+    Write-Host "[WARN] Removing existing zip before compress: $ZipPath"
+    Remove-Item -Path $ZipPath -Force
+}
 Write-Host "[INFO] Zipping to: $ZipPath"
 Compress-Archive -Path $DestDir -DestinationPath $ZipPath -CompressionLevel Optimal
 

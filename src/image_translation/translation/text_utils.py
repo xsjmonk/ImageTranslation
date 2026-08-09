@@ -1,22 +1,20 @@
-"""Conservative text preprocessing for translation input."""
+"""Conservative text preprocessing for translation input.
+
+Preprocessing is intentionally minimal to preserve translation fidelity:
+- normalize line endings
+- strip outer whitespace
+
+NFKC Unicode normalization is intentionally NOT applied: it can rewrite
+compatibility characters and alter content that matters for product/OCR text.
+"""
 
 from __future__ import annotations
 
-import unicodedata
+from .exceptions import TranslationInputError
 
 
 def preprocess(text: str, max_characters: int = 4000) -> str:
-    """Normalize text for translation without altering meaning.
-
-    Allowed:
-    - Normalize Unicode whitespace
-    - Normalize line breaks
-    - Trim outer whitespace
-
-    Not allowed:
-    - Rewrite Chinese characters
-    - Remove punctuation indiscriminately
-    - Convert terminology
+    """Validate and minimally normalize text for translation.
 
     Args:
         text: Raw input text.
@@ -26,21 +24,21 @@ def preprocess(text: str, max_characters: int = 4000) -> str:
         Cleaned text.
 
     Raises:
-        ValueError: If text is empty, whitespace-only, or exceeds max_characters.
+        TranslationInputError: If text is None, empty/whitespace-only,
+            not a string, or exceeds max_characters.
     """
     if text is None:
-        raise ValueError("Input text must not be None")
+        raise TranslationInputError("Input text must not be None")
 
     if not isinstance(text, str):
-        raise ValueError(f"Input must be a string, got {type(text).__name__}")
+        raise TranslationInputError(
+            f"Input must be a string, got {type(text).__name__}"
+        )
 
-    # Normalize Unicode whitespace (non-breaking spaces etc.)
-    cleaned = unicodedata.normalize("NFKC", text)
+    # Normalize line breaks only
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Normalize line breaks
-    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Collapse multiple consecutive newlines
+    # Collapse runs of blank lines (keep single newlines)
     while "\n\n\n" in cleaned:
         cleaned = cleaned.replace("\n\n\n", "\n\n")
 
@@ -48,10 +46,10 @@ def preprocess(text: str, max_characters: int = 4000) -> str:
     cleaned = cleaned.strip()
 
     if not cleaned:
-        raise ValueError("Input text must not be empty or whitespace-only")
+        raise TranslationInputError("Input text must not be empty or whitespace-only")
 
     if len(cleaned) > max_characters:
-        raise ValueError(
+        raise TranslationInputError(
             f"Input text exceeds maximum length of {max_characters} characters "
             f"(got {len(cleaned)})"
         )

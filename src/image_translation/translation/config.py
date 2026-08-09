@@ -40,6 +40,8 @@ class TranslationConfig:
             )
         if self.device not in ("cuda", "cpu"):
             raise ValueError(f"device must be 'cuda' or 'cpu', got '{self.device}'")
+        if self.cuda_device < 0:
+            raise ValueError("cuda_device must be >= 0")
         if self.max_input_characters < 1:
             raise ValueError("max_input_characters must be >= 1")
         if self.batch_size < 1:
