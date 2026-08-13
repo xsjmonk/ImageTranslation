@@ -207,6 +207,7 @@ Structured configuration (`structured` section in `translation-server.config.jso
     {"source": "充电器", "target": "Charger", "exact": true},
     {"source": "防水面料", "target": "Waterproof Fabric", "exact": true}
   ],
+  "preserve_patterns": ["^[A-Z]{2,}/\\d{4}$"],
   "translatable_attributes": [],
   "excluded_tags": ["script", "style", "code", "pre"],
   "excluded_classes": ["notranslate"],
@@ -219,7 +220,15 @@ Structured configuration (`structured` section in `translation-server.config.jso
 
 Notes:
 - `context_window_tokens: 0` — context injection is **not implemented** (M2M100's `generate()` has no reliable context API) and this value is reserved; it MUST stay 0. Segment adjacency is recorded for diagnostics only, not as context. Terminology consistency across segments is guaranteed for protected terms (identifiers/English restore identical text); for translatable Chinese terms it depends on model determinism (fixed beams → deterministic output for identical input).
-- **Terminology memory (glossary)**: a chapter-scoped terminology map. Configured entries (`{"source": "充电器", "target": "Charger", "exact": true}`) are replaced with protected placeholders BEFORE inference and restored to the exact target term afterwards — the same term maps to the same target in EVERY segment (consistent by construction; the model can never paraphrase it). `exact: true` never matches inside a latin word (`cat` ≠ `catalog`); CJK ideograph neighbors are accepted (Chinese has no spaces). Protected identifiers (URLs, codes) always win over glossary terms. After reconstruction, a consistency check counts target occurrences and fails closed on any mismatch.
+- **Inline-code extraction (exact lexical preservation)**: before parsing, a lexical scanner replaces every character reference (`&nbsp;`, `&#160;`, `&#xA0;`, `&amp;`, `&lt;br&gt;`, ...) and every bare `&` with a collision-resistant sentinel; tags are also recorded in their exact source spelling. Entities/tags therefore NEVER reach the model as free text — they are restored from the source map by stable IDs after translation. Guarantees:
+  - `&nbsp;`, `&#160;`, and `&#xA0;` keep their distinct, exact spellings (never decoded/normalized);
+  - `&lt;br&gt;` stays literal text — it can never become a real `<br>` element;
+  - `<br>` vs `<br/>`, tag case, and attribute spelling round-trip exactly (valid input);
+  - the model can never generate, reorder, delete, or rewrite markup/entity codes (adversarial tests prove drop/duplicate/reorder attempts are either rejected and retried, or recovered by the per-run split fallback — and if every attempt fails, the request fails closed with no partial HTML);
+  - model-emitted `&nbsp;`-like text is escaped to `&amp;nbsp;` on output (text, never an entity).
+  - **Normalization boundary** (documented): malformed input (implied/stray tags) falls back to the parser's canonical tag form; attribute values of *translated* attributes are re-serialized canonically (translatable attributes default to none); script/style content is always byte-identical.
+- **`preserve_patterns`**: configurable regex list for project-specific model formats/product codes (e.g. `["^[A-Z]{2,}/\\d{4}$"]`). Matches in non-Chinese spans become `model_number_protected` runs — preserved exactly, never rewritten by the model. Applied on top of the built-in identifier rules (URLs, emails, codes, measurements, versions); invalid patterns raise a configuration error.
+- **Terminology memory (glossary)**: a chapter-scoped terminology map. Configured entries (`{"source": "充电器", "target": "Charger", "exact": true}`) are replaced with protected placeholders BEFORE inference and restored to the exact target term afterwards — the same term maps to the same target in EVERY segment (consistent by construction; the model can never paraphrase it). `exact: true` never matches inside a latin word (`cat` ≠ `catalog`); CJK ideograph neighbors are accepted (Chinese has no spaces). Protected identifiers (URLs, codes) always win over glossary terms. After reconstruction, a consistency check counts target occurrences **in the translated nodes only** (never fooled by target-like strings in excluded or untouched English blocks) and fails closed on any mismatch.
 - Repeated Chinese terms (CJK bigrams/trigrams, ≥3 occurrences) are collected and reported in the metrics for review; they are informational — only configured glossary entries drive replacement.
 - `context_window_tokens` is **explicitly unsupported**: non-zero values raise a configuration error. M2M100's `generate()` has no reliable context API; segment adjacency ids are diagnostics only and are never sent to the model.
 - Machine-readable metrics: the structured result exposes `to_dict()` (segment count, source tokens, target budgets, protected-run count, terminology occurrences with segment ids, repeated terms, elapsed time, retry/fallback counts, validation status) — emitted as JSON by the GPU quality gate.

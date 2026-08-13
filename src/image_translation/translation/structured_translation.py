@@ -274,6 +274,10 @@ class StructuredTranslator:
                 source_language=source_lang,
                 target_language=target_lang,
                 glossary=glossary,
+                preserve_patterns=tuple(
+                    re.compile(p) for p in cfg.preserve_patterns
+                ),
+                translatable_attrs=set(cfg.translatable_attributes),
             )
         except ValueError as e:
             raise StructuredTranslationError(str(e)) from e
@@ -345,18 +349,32 @@ class StructuredTranslator:
             translatable_attrs=translatable_attrs,
         )
 
-        # --- terminology consistency validation ---
+        # --- terminology consistency validation (node-scoped) ---
         # Every configured glossary term must have been replaced by its
-        # target term everywhere it occurred in translatable content.
+        # target term wherever it occurred in TRANSLATABLE content. Counts
+        # are scoped to the translated text nodes ONLY — pre-existing target
+        # text or the source term in excluded/untouched HTML can never mask
+        # a lost glossary occurrence (a global substring count could).
         glossary_occurrences = _collect_glossary_occurrences(all_segments)
+        translatable_node_ids = {
+            r.node_id
+            for s in all_segments
+            for r in s.runs
+            if r.node_id != "tag"
+        }
         for term, info in glossary_occurrences.items():
             target = info["target"]
-            if translated_html.count(target) < info["occurrences"]:
+            in_translated = sum(
+                node.text.count(target)
+                for node in doc.text_nodes()
+                if node.id in translatable_node_ids
+            )
+            if in_translated < info["occurrences"]:
                 raise StructuredTranslationError(
                     f"terminology consistency check failed: term {term!r} "
                     f"mapped to {target!r} in {info['occurrences']} "
-                    f"occurrences, but the output contains only "
-                    f"{translated_html.count(target)} occurrences"
+                    f"occurrences, but the translated text nodes contain it "
+                    f"only {in_translated} times"
                 )
 
         # --- machine-readable metrics ---
@@ -564,6 +582,12 @@ class StructuredTranslator:
         for run in seg.runs:
             if not run.translate:
                 continue  # tags/protected runs restored from raw
+            if not run.raw.strip():
+                # Whitespace-only translate run (edge-whitespace carrier):
+                # nothing to translate — the layout restores its raw spacing
+                # verbatim (edge-whitespace normalization).
+                pieces.append(run.raw)
+                continue
             pmap = ProtectionMap()
             protected = protect_identifiers(run.raw, pmap)
             text = self._call_model(

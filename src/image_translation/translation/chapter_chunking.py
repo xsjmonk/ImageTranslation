@@ -34,11 +34,12 @@ output for identical input.
 
 from __future__ import annotations
 
+import html as html_lib
 import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from .html_document import ElementNode, HTMLDocument
+from .html_document import ElementNode, HTMLDocument, _ENTITY_MARKER_RE
 from .html_protection import ProtectionMap
 from .language_segments import (
     classify,
@@ -71,7 +72,9 @@ CLAUSE_BOUNDARY = "，,：:、"
 RUN_CHINESE = "chinese"                  # translated
 RUN_ENGLISH = "english_protected"        # preserved exactly (placeholder)
 RUN_IDENTIFIER = "identifier_protected"  # preserved exactly (placeholder)
+RUN_MODEL_NUMBER = "model_number_protected"  # user-configured preserve pattern
 RUN_GLOSSARY = "glossary_protected"      # glossary term -> fixed target term
+RUN_ENTITY = "entity_protected"          # character reference, exact spelling
 RUN_TAG = "tag"                          # inline tag placeholder
 RUN_ATTRIBUTE = "attribute"              # attribute value segment
 RUN_WHITESPACE = "whitespace_only"       # whitespace-only node: preserved, not sent
@@ -84,10 +87,13 @@ class Run:
     Attributes:
         node_id: text node id; "tag" for tag runs; "attr:<elem>:<name>" for
             attribute runs.
-        kind: RUN_CHINESE / RUN_ENGLISH / RUN_IDENTIFIER / RUN_TAG /
-            RUN_ATTRIBUTE / RUN_WHITESPACE.
+        kind: RUN_CHINESE / RUN_ENGLISH / RUN_IDENTIFIER / RUN_MODEL_NUMBER /
+            RUN_GLOSSARY / RUN_ENTITY / RUN_TAG / RUN_ATTRIBUTE /
+            RUN_WHITESPACE.
         raw: original source content (text, serialized tag, or attribute
-            value) — restored verbatim for protected runs.
+            value) — restored verbatim for protected runs. Entity runs carry
+            the sentinel marker (the serializer converts markers back to the
+            exact source spelling at the end).
         protected: what appears in ``Segment.source_text`` (placeholder token
             for protected runs, raw text for chinese runs).
         placeholder: the placeholder token, or None for translated runs.
@@ -279,14 +285,33 @@ def _serialize_start_tag(element: ElementNode) -> str:
     return f"<{element.tag}{_serialize_attrs(element.attrs)}>"
 
 
+def _serialize_start_tag(element: ElementNode,
+                         translatable_attrs=frozenset()) -> str:
+    from .html_document import VOID_ELEMENTS
+    if element.raw_start is not None and not any(
+        name in translatable_attrs for name, _value in element.attrs
+    ):
+        return element.raw_start
+    if element.tag in VOID_ELEMENTS:
+        return f"<{element.tag}>"
+    attrs = "".join(
+        f' {name}="{html_lib.escape(value, quote=True)}"'
+        for name, value in element.attrs
+    )
+    return f"<{element.tag}{attrs}>"
+
+
 def _serialize_end_tag(element: ElementNode) -> str:
     from .html_document import VOID_ELEMENTS
+    if element.raw_end is not None:
+        return element.raw_end
     if element.tag in VOID_ELEMENTS:
         return ""
     return f"</{element.tag}>"
 
 
-def prepare_block(block: Block, pmap: ProtectionMap) -> List[dict]:
+def prepare_block(block: Block, pmap: ProtectionMap,
+                  translatable_attrs=frozenset()) -> List[dict]:
     """Protect inline tags; keep text RAW (identifier/English protection is
     applied per slot after splitting, so split fallback can re-protect from
     scratch). Builds ``block.block_text`` from the original content.
@@ -294,6 +319,10 @@ def prepare_block(block: Block, pmap: ProtectionMap) -> List[dict]:
     Items: {"kind": "text", "node_id", "text", "lang"} (raw text),
            {"kind": "tag", "token", "content"} (placeholder token + original
            tag), or {"kind": "whitespace", "node_id", "text"}.
+
+    Tags use their EXACT source spelling (``<br>`` vs ``<br/>``, case) when
+    the source was valid and the element carries no translatable attribute;
+    otherwise the canonical serialization is used.
     """
     items: List[dict] = []
     text_parts: List[str] = []
@@ -312,7 +341,7 @@ def prepare_block(block: Block, pmap: ProtectionMap) -> List[dict]:
         else:
             element = item["element"]
             if item["side"] == "start":
-                content = _serialize_start_tag(element)
+                content = _serialize_start_tag(element, translatable_attrs)
                 kind = "tag_start"
             else:
                 content = _serialize_end_tag(element)
@@ -386,14 +415,19 @@ def build_text_runs(
     pmap: ProtectionMap,
     offset_base: int,
     glossary=None,
+    preserve_patterns=(),
 ) -> List[Run]:
     """Turn one raw text node into explicit runs.
 
     Policy:
+    - character-reference sentinels (from the lexical layer) become
+      ``entity_protected`` runs restored to their EXACT source spelling;
     - maximal CJK regions (including surrounding whitespace) -> translated
       chinese runs (one run per region — no adjacent translate runs);
     - configured glossary terms inside chinese regions -> protected runs
       restored to the configured TARGET term (terminology memory);
+    - user-configured ``preserve_patterns`` (project model formats) ->
+      ``model_number_protected`` runs, exact;
     - identifiers (URLs, codes, versions, measurements, ...) -> protected;
     - remaining non-Chinese spans (ordinary English) -> protected;
     - whitespace-only spans merge into an adjacent chinese region so the
@@ -401,8 +435,52 @@ def build_text_runs(
 
     All protected spans get placeholders; their ``raw`` holds the original
     text and is restored verbatim after inference (glossary runs restore
-    ``restore_text`` — the configured target term).
+    ``restore_text`` — the configured target term; entity runs carry the
+    sentinel marker, which the serializer converts to the exact spelling).
     """
+    runs: List[Run] = []
+    cursor = 0
+    pieces = re.split(_ENTITY_MARKER_RE, raw)
+    i = 0
+    while i < len(pieces):
+        text_piece = pieces[i]
+        if text_piece:
+            runs.extend(_text_runs(
+                node_id, text_piece, pmap, offset_base + cursor,
+                glossary, preserve_patterns,
+            ))
+            cursor += len(text_piece)
+        if i + 2 < len(pieces):
+            nonce, idx = pieces[i + 1], pieces[i + 2]
+            marker = f"\x02ITENT{nonce}{idx}\x03"
+            token = pmap.reserve(marker, kind="entity")
+            runs.append(Run(
+                node_id=node_id,
+                kind=RUN_ENTITY,
+                raw=marker,
+                protected=token,
+                placeholder=token,
+                offset_start=offset_base + cursor,
+                offset_end=offset_base + cursor + len(marker),
+                sequence_index=len(runs),
+            ))
+            cursor += len(marker)
+            i += 3
+        else:
+            i += 1
+    return runs
+
+
+def _text_runs(
+    node_id: str,
+    raw: str,
+    pmap: ProtectionMap,
+    offset_base: int,
+    glossary=None,
+    preserve_patterns=(),
+) -> List[Run]:
+    """Region-splitting + run emission for entity-free text (see
+    build_text_runs for the full policy)."""
     # 1) Regions: chinese regions absorb adjacent whitespace-only spans.
     #    Non-chinese regions are stripped of edge whitespace first, so the
     #    spaces around identifiers/English never become placeholder runs
@@ -461,7 +539,8 @@ def build_text_runs(
         ):
             if start > pos:
                 _emit_region(runs, node_id, is_chinese, span[pos:start],
-                             pmap, offset_base + cursor + pos)
+                             pmap, offset_base + cursor + pos,
+                             preserve_patterns)
             token = pmap.reserve(entry.target, kind="glossary")
             runs.append(Run(
                 node_id=node_id,
@@ -477,13 +556,15 @@ def build_text_runs(
             pos = end
         if pos < len(span):
             _emit_region(runs, node_id, is_chinese, span[pos:],
-                         pmap, offset_base + cursor + pos)
+                         pmap, offset_base + cursor + pos,
+                         preserve_patterns)
         cursor += len(span)
     return runs
 
 
 def _emit_region(runs: List[Run], node_id: str, is_chinese: bool, span: str,
-                 pmap: ProtectionMap, offset_base: int) -> None:
+                 pmap: ProtectionMap, offset_base: int,
+                 preserve_patterns=()) -> None:
     """Emit normal runs for a region gap (no glossary terms inside)."""
     if is_chinese:
         runs.append(Run(
@@ -498,7 +579,49 @@ def _emit_region(runs: List[Run], node_id: str, is_chinese: bool, span: str,
         ))
         return
 
-    # Non-Chinese span: protect identifiers, then protect the rest
+    # Non-Chinese span: user-configured preserve patterns first (project
+    # model formats), then identifiers, then the remaining English.
+    if preserve_patterns:
+        matches = []
+        for pat in preserve_patterns:
+            for m in pat.finditer(span):
+                matches.append((m.start(), m.end(), m.group(0)))
+        matches.sort()
+        selected = []
+        last_end = -1
+        for start, end, text in matches:
+            if start < last_end:
+                continue
+            selected.append((start, end, text))
+            last_end = end
+        pos = 0
+        for start, end, text in selected:
+            if start > pos:
+                _emit_english_span(runs, node_id, span[pos:start],
+                                   pmap, offset_base + pos)
+            token = pmap.reserve(text, kind="model")
+            runs.append(Run(
+                node_id=node_id,
+                kind=RUN_MODEL_NUMBER,
+                raw=text,
+                protected=token,
+                placeholder=token,
+                offset_start=offset_base + start,
+                offset_end=offset_base + end,
+                sequence_index=len(runs),
+            ))
+            pos = end
+        if pos < len(span):
+            _emit_english_span(runs, node_id, span[pos:],
+                               pmap, offset_base + pos)
+        return
+
+    _emit_english_span(runs, node_id, span, pmap, offset_base)
+
+
+def _emit_english_span(runs: List[Run], node_id: str, span: str,
+                       pmap: ProtectionMap, offset_base: int) -> None:
+    """Protect identifiers, then protect the remaining English text."""
     protected = protect_identifiers(span, pmap)
     parts = re.split(r"(__ITRANSLATE_[A-Z]\d{4}_)", protected)
     cursor = 0
@@ -586,6 +709,8 @@ def segment_blocks(
     source_language: str = "zh",
     target_language: str = "en",
     glossary=None,
+    preserve_patterns=(),
+    translatable_attrs=frozenset(),
 ) -> List[Segment]:
     """Turn blocks into model-sized segments, preserving document order.
 
@@ -613,7 +738,7 @@ def segment_blocks(
         # Throwaway map for token-measurement probes: probing must not
         # reserve real placeholder tokens (probe tokens are never in cur_src).
         probe_pmap = ProtectionMap()
-        items = prepare_block(block, pmap)
+        items = prepare_block(block, pmap, translatable_attrs=translatable_attrs)
         block.block_key = f"b{block_seq:04d}"
         block_seq += 1
 
@@ -719,14 +844,16 @@ def segment_blocks(
 
             def protected_for(fragment: str) -> str:
                 probe_runs = build_text_runs(
-                    node_id, fragment, probe_pmap, 0, glossary=glossary
+                    node_id, fragment, probe_pmap, 0, glossary=glossary,
+                    preserve_patterns=preserve_patterns,
                 )
                 return "".join(r.protected for r in probe_runs)
 
             def emit(fragment: str) -> None:
                 append_runs(
                     build_text_runs(
-                        node_id, fragment, pmap, orig_cursor, glossary=glossary
+                        node_id, fragment, pmap, orig_cursor, glossary=glossary,
+                        preserve_patterns=preserve_patterns,
                     )
                 )
 
@@ -743,17 +870,32 @@ def segment_blocks(
                 else:
                     # Glossary terms are atomic: a cut must never land inside
                     # one (the same term must be glossary-mapped in exactly
-                    # one segment — consistency by construction).
+                    # one segment — consistency by construction). Entity
+                    # sentinel markers are equally atomic: a cut inside a
+                    # marker would split one entity across two segments and
+                    # corrupt the exact-spelling restoration.
                     term_spans = [
                         (s, e) for s, e, _entry
                         in find_glossary_spans(text, glossary or ())
+                    ]
+                    marker_spans = [
+                        (m.start(), m.end())
+                        for m in _ENTITY_MARKER_RE.finditer(text)
                     ]
 
                     def avoid_terms(cut: int) -> int:
                         for s, e in term_spans:
                             if s < cut < e:
-                                # move to the nearer term boundary
+                                # move to the nearer atomic boundary
                                 return s if (cut - s) <= (e - cut) else e
+                        for s, e in marker_spans:
+                            if s < cut < e:
+                                # Prefer the marker START: the prefix always
+                                # fits the measured budget (a partial marker
+                                # would corrupt exact-spelling restoration).
+                                # Only when the marker starts the text (cut
+                                # would make no progress) snap to its end.
+                                return s if s > 0 else e
                         return cut
 
                     # Find the max prefix of `text` that fits the remaining budget

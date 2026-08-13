@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -147,6 +149,28 @@ class TestFormatField:
         assert "Use the USB-C cable" in out
         assert "ABC-123" in out and "Windows 11" in out
         assert "click" in out
+
+    def test_entity_spelling_preserved_via_api(self, client):
+        """HTML requests: entity spellings survive exactly (never decoded
+        or normalized), and &lt;br&gt; never becomes a real tag."""
+        resp = client.post(
+            "/translate",
+            json={
+                "text": (
+                    "<p>中文&nbsp;English 与&#160;中文，&#xA0;以及&amp;。</p>"
+                    "<p>中文&lt;br&gt;English 与<br/>中文</p>"
+                ),
+                "format": "html",
+            },
+        )
+        assert resp.status_code == 200
+        out = resp.json()["translation"]
+        assert "&nbsp;" in out and "&#160;" in out and "&#xA0;" in out
+        assert "&amp;" in out
+        assert "&lt;br&gt;" in out
+        assert "<br/>" in out
+        # escaped markup never became a REAL <br> tag (only <br/> survives)
+        assert len(re.findall(r"<br(?!/)>", out)) == 0
 
     def test_error_returns_no_partial_html(self):
         """On failure the error envelope contains no translation field."""

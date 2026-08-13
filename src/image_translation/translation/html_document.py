@@ -1,30 +1,49 @@
 """HTML5 document model, parser, serializer, and structural fingerprint.
 
+Lexical-preservation layer (this task's guarantee):
+- BEFORE html5lib parsing, a lexical scanner walks the raw source and
+  replaces every character reference (``&nbsp;``, ``&#160;``, ``&#xA0;``,
+  ``&amp;``, ``&lt;br&gt;``, ...) — and every bare ampersand — with a
+  collision-resistant sentinel marker. The marker survives parsing as plain
+  text and ``serialize()`` converts it back to the EXACT original spelling.
+  Entities therefore never reach the translator as free text and are never
+  normalized by the parser: ``&nbsp;``, ``&#160;`` and ``&#xA0;`` remain
+  distinct, and ``&lt;br&gt;`` stays literal text — it can never become a
+  real ``<br>`` element.
+- The scanner also records the EXACT source spelling of every tag
+  (``<br>`` vs ``<br/>``, ``</STRONG>`` vs ``</strong>``). For VALID input
+  these raw spellings are attached to their elements and restored verbatim;
+  for malformed input (implied/stray tags) the parser's canonical form is
+  used instead (documented normalization boundary).
+- Raw-text elements (script/style) are skipped entirely: their content is
+  never sentinelized and stays byte-identical.
+
 Parser (documented policy):
 - Uses html5lib (the reference HTML5 parser) in fragment mode with
   ``namespaceHTMLElements=False``. Malformed input is NORMALIZED
   deterministically per the HTML5 algorithm (never rejected, never regex):
     * stray end tags are ignored (``<p>a</span>b`` -> ``<p>ab</p>``);
     * implied end tags are applied (``<p>a<div>b`` -> ``<p>a</p><div>b</div>``);
-    * void elements are canonicalized (``<br/>`` -> ``<br>``);
     * attribute names are lowercased, values entity-decoded;
-    * character references are decoded (``&#233;`` -> ``é``, ``&amp;`` -> ``&``).
-- A leading ``<!DOCTYPE ...>`` is preserved verbatim as a document prefix
-  (fragment parsing drops it).
 - Script/style contents are raw-text: kept verbatim, never parsed as markup.
 
 Serializer guarantee (documented):
-- NOT byte preservation. Guarantee: *semantic round-trip* — after parse +
-  serialize, tag names, nesting, attribute names/values, comments, doctype,
-  text content, whitespace, and excluded subtrees are unchanged as data;
-  quoting, void-tag form, entity encoding, and case are normalized
-  (attributes double-quoted, text re-escaped, void tags unclosed).
+- EXACT lexical preservation for all recognized inline codes in valid input:
+  entity spellings (``&nbsp;``/``&#160;``/``&#xA0;``/``&amp;``/...), bare
+  ampersands, and tag spellings (``<br>`` vs ``<br/>``, case, attribute
+  spelling) are restored byte-for-byte from the source.
+- Normalization boundary (documented, only outside the above): malformed
+  markup is serialized in the parser's canonical form; attribute quoting is
+  normalized when an attribute is translated (allowlist); unknown/malformed
+  entity forms are covered by the bare-``&`` rule and stay literal.
 - Text nodes are escaped on output (``& < >``), so any markup-like content —
-  including text produced by the translation model — can never inject tags.
+  including text produced by the translation model — can never inject tags
+  or entities. Model-emitted ``&nbsp;`` becomes ``&amp;nbsp;`` (text).
 
 Fingerprint: detects tag movement, attribute changes, omitted/duplicated
 nodes, and changed excluded content. Translatable-attribute VALUES are
-excluded from the fingerprint (they legitimately change).
+excluded from the fingerprint (they legitimately change). Entity sentinels
+are stable text markers, so the fingerprint is entity-spelling-independent.
 """
 
 from __future__ import annotations
@@ -32,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import html as html_lib
 import re
+import secrets
 from typing import Dict, List, Optional, Set, Tuple
 
 VOID_ELEMENTS = {
@@ -44,6 +64,23 @@ RAW_TEXT_ELEMENTS = {"script", "style"}
 Attr = Tuple[str, str]
 
 _DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE[^>]*>", re.IGNORECASE)
+
+# Character references: named (with or without the legacy trailing ';'),
+# decimal, or hex. The trailing ``(?:;|(?!...))`` group keeps the ';' when
+# present and still rejects prefixes of longer alphanumeric runs ("AT&T" ->
+# bare '&' + "T" stays literal text).
+_ENTITY_REF_RE = re.compile(
+    r"&(?:#[0-9]{1,8}(?:;|(?![A-Za-z0-9]))"
+    r"|#[xX][0-9a-fA-F]{1,8}(?:;|(?![A-Za-z0-9]))"
+    r"|[A-Za-z][A-Za-z0-9]{0,31}(?:;|(?![A-Za-z0-9])))"
+)
+
+# Sentinel marker: STX + "ITENT" + 8-hex nonce + 4-digit index + ETX.
+_ENTITY_MARKER_RE = re.compile(r"\x02ITENT([0-9a-f]{8})(\d{4})\x03")
+
+
+def entity_marker(nonce: str, index: int) -> str:
+    return f"\x02ITENT{nonce}{index:04d}\x03"
 
 
 class Node:
@@ -71,6 +108,9 @@ class ElementNode(Node):
         self.tag = tag
         self.attrs = attrs
         self.id = node_id
+        # Exact source spellings (valid input only; None = canonical form)
+        self.raw_start: Optional[str] = None
+        self.raw_end: Optional[str] = None
 
 
 class CommentNode(Node):
@@ -90,32 +130,45 @@ class DoctypeNode(Node):
 
 
 class HTMLDocument:
-    """An HTML5-normalized fragment/document with ordered node tree."""
+    """An HTML5-normalized fragment/document with ordered node tree.
+
+    Entity spellings and tag spellings are preserved exactly from the
+    original source via the lexical layer (see module docstring).
+    """
 
     def __init__(self, source: str) -> None:
         self.source = source
         self.root = ElementNode("#document", [], "#root")
         self._next_text_id = 1
         self._next_elem_id = 1
+        self._entities: Dict[int, str] = {}
+        self._nonce = secrets.token_hex(4)
+        self._entity_marker_re = re.compile(
+            r"\x02ITENT" + re.escape(self._nonce) + r"(\d{4})\x03"
+        )
         self._parse(source)
 
     # ------------------------------------------------------------------
-    # Parsing (html5lib)
+    # Parsing (html5lib, after the lexical entity/tag scan)
     # ------------------------------------------------------------------
 
     def _parse(self, source: str) -> None:
         import html5lib
         from xml.etree import ElementTree as ET
 
+        # 1) Lexical scan: sentinelize character references (exact spelling
+        #    preservation) and record exact raw tag spellings.
+        sentinelized, self._entities, raw_tags = _lexical_scan(source, self._nonce)
+
         # Preserve a leading doctype verbatim (fragment parsing drops it)
-        m = _DOCTYPE_RE.match(source)
+        m = _DOCTYPE_RE.match(sentinelized)
         if m:
             self.root.children.append(DoctypeNode(m.group(0).strip()))
-            source = source[m.end():]
+            sentinelized = sentinelized[m.end():]
 
         try:
             frag = html5lib.parseFragment(
-                source,
+                sentinelized,
                 treebuilder="etree",
                 namespaceHTMLElements=False,
             )
@@ -127,6 +180,45 @@ class HTMLDocument:
             self.root.children.append(TextNode(frag.text, self._new_text_id()))
 
         self._convert_children(frag, self.root)
+        self._pair_raw_tags(raw_tags)
+
+    def _pair_raw_tags(self, raw_tags: List[Tuple[str, str]]) -> None:
+        """Attach exact source tag spellings to their elements.
+
+        For VALID input, source start tags correspond 1:1 with elements in
+        document order and end tags close the element stack in order. Any
+        mismatch (implied/stray tags from malformed input) invalidates the
+        whole mapping: all elements fall back to the canonical serialization
+        (documented normalization boundary).
+        """
+        if not raw_tags:
+            return
+        elements = [
+            e for e in self.walk()
+            if e.kind == "element" and e.tag != "#document"
+        ]
+        stack: List[ElementNode] = []
+        elems = iter(elements)
+        valid = True
+        for name, raw in raw_tags:
+            if name.startswith("/"):
+                if not stack or stack[-1].tag != name[1:]:
+                    valid = False
+                    break
+                stack.pop().raw_end = raw
+                continue
+            elem = next(elems, None)
+            if elem is None or elem.tag != name:
+                valid = False
+                break
+            elem.raw_start = raw
+            if elem.tag not in VOID_ELEMENTS:
+                stack.append(elem)
+        if not valid or next(elems, None) is not None or stack:
+            # Malformed input: canonical serialization for every tag.
+            for e in elements:
+                e.raw_start = None
+                e.raw_end = None
 
     def _convert_children(self, etree_parent, node_parent: ElementNode) -> None:
         """Convert an ElementTree fragment into our node model.
@@ -228,11 +320,20 @@ class HTMLDocument:
         return ids
 
     # ------------------------------------------------------------------
-    # Serialization (semantic round-trip; injection-safe)
+    # Serialization (exact entity/tag spellings; injection-safe)
     # ------------------------------------------------------------------
 
     def serialize(self) -> str:
-        return "".join(_serialize_node(child) for child in self.root.children)
+        out = "".join(_serialize_node(child) for child in self.root.children)
+        # Restore entity sentinels to their EXACT source spellings. Markers
+        # only exist where the lexical scanner placed them (never in model
+        # output: the model never sees markers), and the per-document nonce
+        # makes source collisions impossible.
+        if self._entities:
+            out = self._entity_marker_re.sub(
+                lambda m: self._entities.get(int(m.group(1)), m.group(0)), out
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Structural fingerprint
@@ -261,6 +362,113 @@ class HTMLDocument:
 
 
 # ---------------------------------------------------------------------------
+# Lexical scanner: character-reference sentinelization + raw tag spellings
+# ---------------------------------------------------------------------------
+
+_TAG_NAME_RE = re.compile(r"</?\s*([A-Za-z][A-Za-z0-9]*)")
+
+
+def _lexical_scan(
+    source: str, nonce: str
+) -> Tuple[str, Dict[int, str], List[Tuple[str, str]]]:
+    """Walk the raw source once, emitting:
+    - ``sentinelized``: source with every character reference (and bare
+      ampersand) replaced by a per-document sentinel marker;
+    - ``entities``: marker index -> EXACT source spelling;
+    - ``raw_tags``: [(name, exact_spelling), ...] for every tag in document
+      order; end tags use the name with a leading ``/``.
+
+    The scanner is context-aware: tags (``<...>`` with quoted strings),
+    comments, declarations, CDATA, and script/style raw-text content are
+    passed through untouched (no sentinels inside them).
+    """
+    entities: Dict[int, str] = {}
+    raw_tags: List[Tuple[str, str]] = []
+    out: List[str] = []
+    i, n = 0, len(source)
+
+    def emit_entity(raw: str) -> None:
+        idx = len(entities)
+        entities[idx] = raw
+        out.append(entity_marker(nonce, idx))
+
+    while i < n:
+        ch = source[i]
+        if ch == "<":
+            if source.startswith("<!--", i):
+                j = source.find("-->", i + 4)
+                j = n if j < 0 else j + 3
+                out.append(source[i:j])
+                i = j
+                continue
+            if source.startswith("<![CDATA[", i):
+                j = source.find("]]>", i + 9)
+                j = n if j < 0 else j + 3
+                out.append(source[i:j])
+                i = j
+                continue
+            if source.startswith("<!", i) or source.startswith("<?", i):
+                j = source.find(">", i)
+                j = n if j < 0 else j + 1
+                out.append(source[i:j])
+                i = j
+                continue
+            # Element tag: scan to '>' honoring quoted attribute values.
+            j = i + 1
+            quoted = None
+            while j < n:
+                c = source[j]
+                if quoted:
+                    if c == quoted:
+                        quoted = None
+                elif c in "\"'":
+                    quoted = c
+                elif c == ">":
+                    break
+                j += 1
+            if j >= n:
+                out.append("<")  # unterminated '<': keep as plain text
+                i += 1
+                continue
+            raw = source[i:j + 1]
+            out.append(raw)
+            name = ""
+            tm = _TAG_NAME_RE.match(raw)
+            if tm:
+                name = tm.group(1).lower()
+                raw_tags.append((f"/{name}" if raw.startswith("</") else name, raw))
+            if name in RAW_TEXT_ELEMENTS and not raw.startswith("</"):
+                # Raw-text element: skip content verbatim until its closing
+                # tag (script/style content is never entity-decoded).
+                close = re.search(
+                    r"</\s*" + re.escape(name) + r"\s*>", source[j + 1:], re.IGNORECASE
+                )
+                if close:
+                    end = j + 1 + close.end()
+                    out.append(source[j + 1:end])
+                    raw_tags.append((f"/{name}", source[j + 1 + close.start():end]))
+                    i = end
+                else:
+                    out.append(source[j + 1:])
+                    i = n
+                continue
+            i = j + 1
+            continue
+        if ch == "&":
+            m = _ENTITY_REF_RE.match(source, i)
+            if m:
+                emit_entity(m.group(0))
+                i = m.end()
+            else:
+                emit_entity("&")  # bare ampersand: exact literal
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), entities, raw_tags
+
+
+# ---------------------------------------------------------------------------
 # Serializer
 # ---------------------------------------------------------------------------
 
@@ -285,7 +493,11 @@ def _serialize_node(node: Node) -> str:
         return node.text
     if node.kind == "element":
         if node.tag in VOID_ELEMENTS:
+            if node.raw_start is not None:
+                return node.raw_start
             return f"<{node.tag}{_serialize_attrs(node.attrs)}>"
         inner = "".join(_serialize_node(child) for child in node.children)
+        if node.raw_start is not None and node.raw_end is not None:
+            return f"{node.raw_start}{inner}{node.raw_end}"
         return f"<{node.tag}{_serialize_attrs(node.attrs)}>{inner}</{node.tag}>"
     return ""

@@ -15,6 +15,7 @@
     "max_target_tokens": 400,
     "context_window_tokens": 0,
     "glossary": [],
+    "preserve_patterns": [],
     "translatable_attributes": [],
     "excluded_tags": ["script", "style", "code", "pre"],
     "excluded_classes": ["notranslate"],

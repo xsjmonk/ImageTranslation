@@ -161,6 +161,9 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         max_target_tokens=structured_raw.get("max_target_tokens", 400),
         context_window_tokens=structured_raw.get("context_window_tokens", 0),
         glossary=glossary,
+        preserve_patterns=tuple(
+            structured_raw.get("preserve_patterns", ())
+        ),
         translatable_attributes=tuple(
             structured_raw.get("translatable_attributes", ())
         ),

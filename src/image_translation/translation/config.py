@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -114,6 +115,11 @@ class StructuredConfig:
     - glossary: chapter terminology memory. Each entry maps a source term to
       an exact target term; terms are protected before inference and restored
       consistently across every segment. See GlossaryEntry.
+    - preserve_patterns: configurable regex patterns for project-specific
+      model formats/product codes. Matches inside non-Chinese (Latin) spans
+      become ``model_number_protected`` runs — preserved exactly, never
+      rewritten by the model. Applied on top of the built-in identifier
+      rules; invalid patterns raise a configuration error.
     - translatable_attributes: allowlist of human-readable attribute values
       (e.g. alt, title, aria-label) that may be translated. URL/code/style
       attributes are never translated. Empty = no attributes translated.
@@ -132,6 +138,7 @@ class StructuredConfig:
     max_target_tokens: int = 400
     context_window_tokens: int = 0
     glossary: tuple = ()  # tuple[GlossaryEntry, ...] — terminology memory
+    preserve_patterns: tuple = ()  # tuple[str, ...] — regexes (model formats)
     translatable_attributes: tuple = ()  # e.g. ("alt", "title", "aria-label")
     excluded_tags: tuple = ("script", "style", "code", "pre")
     excluded_classes: tuple = ("notranslate",)
@@ -161,6 +168,18 @@ class StructuredConfig:
             raise ValueError("max_retries_per_segment must be >= 0")
         if self.concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        # --- preserve_patterns validation ---
+        for pat in self.preserve_patterns:
+            if not isinstance(pat, str) or not pat.strip():
+                raise ValueError(
+                    "preserve_patterns entries must be non-empty regex strings"
+                )
+            try:
+                re.compile(pat)
+            except re.error as e:
+                raise ValueError(
+                    f"preserve_patterns entry {pat!r} is not a valid regex: {e}"
+                )
         # --- glossary validation ---
         entries = list(self.glossary)
         for e in entries:

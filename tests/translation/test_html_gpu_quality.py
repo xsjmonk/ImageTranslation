@@ -7,6 +7,7 @@ Uses the REAL M2M100 model (FP32, num_beams=4). Run explicitly:
 from __future__ import annotations
 
 import gc
+import re
 import threading
 import time
 
@@ -91,6 +92,19 @@ def _build_long_chapter() -> str:
                 "<ul><li>支持 20V/5A 快充协议</li>"
                 "<li>内置过压保护，型号 ABC-123</li>"
                 "<li>通过 USB-C 连接设备</li></ul>"
+            )
+        elif i == 13:
+            # inline codes: entities + <br/> spellings + escaped markup
+            parts.append(
+                "<p>型号 X13&nbsp;与 X1300&#160;兼容，功耗 &lt; 5W&amp;稳定，"
+                "支持 USB-C。<br/>更多说明&#xA0;见文档。</p>"
+            )
+        elif i == 17:
+            # <a> link with attribute entity + a plain <br>
+            parts.append(
+                "<p>更多信息请访问 "
+                "<a href=\"/manual?p=2&amp;v=3\">在线文档</a>"
+                " 或联系支持。<br>联系电话见附录。</p>"
             )
         elif i % 11 == 0:
             # repeated product term so terminology consistency is testable
@@ -214,6 +228,48 @@ class TestHtmlGpuQuality:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2)[:1200])
         self._record_params(res, translator, extra="glossary")
 
+    def test_entities_and_inline_codes_real_model(self):
+        """Real-model gate: entity spellings, <br> vs <br/>, and escaped
+        markup survive the full pipeline exactly."""
+        from image_translation.translation import (
+            StructuredConfig,
+            StructuredTranslator,
+            TranslationConfig,
+            create_translator,
+        )
+        html = (
+            "<h1>产品总览&nbsp;Overview</h1>"
+            "<p>型号 ABC-123&nbsp;采用<strong>加厚防水面料</strong>"
+            "<br>适合 daily use，功耗&lt;5W&amp;稳定。</p>"
+            "<p>中文&#160;English 与&#xA0;中文，AT&amp;T 兼容 AT&T。</p>"
+            "<p>换行<br/>后继续，&lt;br&gt;保持字面。</p>"
+            "<script>var s = \"&nbsp;\";</script>"
+        )
+        translator = create_translator(TranslationConfig())
+        st = StructuredTranslator(
+            translator, StructuredConfig(), TranslationConfig(),
+            document_id="entities",
+        )
+        res = st.translate(html)
+        out = res.translated_html
+        assert res.fingerprint_ok
+        # exact spellings preserved
+        assert "&nbsp;" in out
+        assert "&#160;" in out
+        assert "&#xA0;" in out
+        assert "&amp;" in out
+        assert "AT&T" in out  # literal ampersand
+        assert "&lt;" in out and "&gt;" in out  # escaped markup stays text
+        assert "<br>" in out and "<br/>" in out
+        # escaped markup never became a REAL <br> tag (only <br/> survives)
+        assert len(re.findall(r"<br(?!/)>", out)) == 1
+        # excluded script byte-identical
+        assert 'var s = "&nbsp;";' in out
+        # chinese translated
+        assert not any("\u4e00" <= ch <= "\u9fff" for ch in out), out
+        print(f"\nSRC: {html}\nOUT: {out}")
+        self._record_params(res, translator, extra="entities")
+
     def test_mixed_chapter(self):
         from image_translation.translation import (
             StructuredConfig,
@@ -279,6 +335,9 @@ class TestHtmlGpuQuality:
         assert html.count("ABC-123") >= 3  # repeated terminology/identifiers
         assert html.count("USB-C") >= 3
         assert html.count("Windows 11") >= 2
+        # inline codes present: entities + <br/> + escaped markup
+        assert "&nbsp;" in html and "&#160;" in html and "&#xA0;" in html
+        assert "<br/>" in html and "&lt;" in html
 
         translator = create_translator(TranslationConfig())
         # Small budget forces paragraph splits across model segments
@@ -327,6 +386,14 @@ class TestHtmlGpuQuality:
         assert out.count("ABC-123") == html.count("ABC-123")
         assert out.count("USB-C") == html.count("USB-C")
         assert out.count("Windows 11") == html.count("Windows 11")
+        # Inline codes exact and complete: entity spellings + <br/> + escaped
+        # markup survive the whole long chapter
+        assert out.count("&nbsp;") == html.count("&nbsp;")
+        assert out.count("&#160;") == html.count("&#160;")
+        assert out.count("&#xA0;") == html.count("&#xA0;")
+        assert out.count("&amp;") == html.count("&amp;")
+        assert out.count("&lt;") == html.count("&lt;")
+        assert out.count("<br/>") == html.count("<br/>")
         # The all-English paragraph stays byte-identical
         assert ("<p>Model ABC-123 uses the USB-C interface and works with "
                 "Windows 11.</p>") in out
@@ -353,6 +420,23 @@ class TestHtmlGpuQuality:
         for marker in CORRUPTION_MARKERS:
             assert marker not in lowered, f"corruption marker {marker!r}"
 
+        # --- plausibly-English + expected-concept gate (beyond tag counts) ---
+        # The fixture is a charger manual: the translated spans must contain
+        # expected semantic concepts, not arbitrary English.
+        concepts = ["charg", "power", "volt", "current", "temperatur",
+                    "protect", "safe", "fast", "device", "support"]
+        found_concepts = [c for c in concepts if c in lowered]
+        assert len(found_concepts) >= 3, (
+            f"expected concepts missing from output: {found_concepts}"
+        )
+        # No untranslated CJK may remain in translatable positions (the
+        # excluded notranslate block is removed before the check).
+        import re as _re2
+        without_excluded = out.replace("END-OF-CHAPTER 保持不变", "")
+        text_only = _re2.sub(r"<[^>]+>", "", without_excluded)
+        cjk_left = _re2.findall(r"[\u4e00-\u9fff]", text_only)
+        assert not cjk_left, f"untranslated CJK remains: {cjk_left}"
+
         # --- machine-readable quality-gate metrics ---------------------
         import json
         metrics = res.to_dict()
@@ -373,7 +457,10 @@ class TestHtmlGpuQuality:
         print("Excerpt:", out[:300])
 
     def test_direct_vs_api_html_parity(self):
-        """Same structured input through the module and the live HTTP API."""
+        """The SAME long chapter (60 paragraphs, >4000 chars, entities,
+        <strong>, <a>, <br>, <br/>) through the direct module and the live
+        HTTP API must produce IDENTICAL translated HTML, with the structural
+        evidence intact on both sides."""
         import requests
         import uvicorn
 
@@ -387,21 +474,55 @@ class TestHtmlGpuQuality:
         from translation_server.config import load_server_config
         from translation_server.runtime import TranslationRuntime
 
-        # Direct module
+        html = _build_long_chapter()
+        assert len(html) > 4000 and html.count("<p>") >= 50
+        assert "<strong>" in html and "<a " in html
+        assert "<br>" in html and "<br/>" in html
+        assert "&nbsp;" in html and "&amp;" in html
+
+        # Direct module (default structured config — same as the server file)
         translator = create_translator(TranslationConfig())
         st = StructuredTranslator(
-            translator, StructuredConfig(), TranslationConfig(), document_id="parity"
+            translator, StructuredConfig(), TranslationConfig(),
+            document_id="parity-long",
         )
-        direct = st.translate(MIXED_CHAPTER).translated_html
+        res = st.translate(html)
+        direct = res.translated_html
+        direct_metrics = {
+            "segments": res.segment_count,
+            "source_tokens": res.total_source_tokens,
+            "retries": res.retry_count,
+            "fallbacks": res.fallback_count,
+        }
+
+        # Structural evidence on the DIRECT side
+        assert res.fingerprint_ok
+        assert "END-OF-CHAPTER 保持不变" in direct
+        assert direct.count("ABC-123") == html.count("ABC-123")
+        assert direct.count("USB-C") == html.count("USB-C")
+        assert direct.count("Windows 11") == html.count("Windows 11")
+        assert direct.count("&nbsp;") == html.count("&nbsp;")
+        assert direct.count("&#160;") == html.count("&#160;")
+        assert direct.count("&#xA0;") == html.count("&#xA0;")
+        assert direct.count("&amp;") == html.count("&amp;")
+        assert direct.count("<br/>") == html.count("<br/>")
+        assert direct.count("<a ") == html.count("<a ")
+        # first/middle/last paragraphs present
+        assert "充电器产品说明书" not in direct  # h1 translated
+        assert "Product" in direct or "Charger" in direct
+        assert direct.find("X1300") > direct.find("X13")
+        assert direct.find("END-OF-CHAPTER") > direct.find("Charger")
 
         # Free VRAM so the server can load its own model copy
-        del translator, st
+        del translator, st, res
         gc.collect()
         torch.cuda.empty_cache()
 
         # Live HTTP API with the repo config (FP32, beams=4)
         cfg = load_server_config()
-        assert cfg.structured.max_segment_tokens >= 100
+        assert cfg.translation.precision == "auto"
+        assert cfg.translation.generation.num_beams == 4
+        assert cfg.structured.max_segment_tokens == 450
         app = create_app(TranslationRuntime(cfg))
         port = 18092
         server_cfg = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
@@ -425,7 +546,7 @@ class TestHtmlGpuQuality:
 
             resp = requests.post(
                 f"{base}/translate",
-                json={"text": MIXED_CHAPTER, "format": "html"},
+                json={"text": html, "format": "html"},
                 timeout=600,
             )
             assert resp.status_code == 200, f"API {resp.status_code}: {resp.text}"
@@ -434,7 +555,11 @@ class TestHtmlGpuQuality:
                 f"API HTML output differs from direct module output!\n"
                 f"direct: {direct[:400]!r}\napi:    {api_out[:400]!r}"
             )
-            print("\n=== API/HTML PARITY OK ===")
+            # the API side carries the same structural evidence
+            assert api_out.count("ABC-123") == html.count("ABC-123")
+            assert api_out.count("&nbsp;") == html.count("&nbsp;")
+            print(f"\n=== LONG CHAPTER API/HTML PARITY OK "
+                  f"metrics={direct_metrics} ===")
         finally:
             server.should_exit = True
             thread.join(timeout=15)

@@ -28,6 +28,7 @@ class TestLoadServerConfig:
             {
                 "server": {"host": "127.0.0.1", "port": 9000},
                 "runtime": {"warmup_on_start": False},
+                "structured": {"preserve_patterns": ["^[A-Z]{2,}/\\d{4}$"]},
                 "translation": {"model_name": "facebook/m2m100_418M"},
             },
         )
@@ -35,6 +36,7 @@ class TestLoadServerConfig:
         assert cfg.server.port == 9000
         assert cfg.runtime.warmup_on_start is False
         assert cfg.translation.model_name == "facebook/m2m100_418M"
+        assert cfg.structured.preserve_patterns == ("^[A-Z]{2,}/\\d{4}$",)
 
     def test_missing_explicit_config_fails(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="not found"):

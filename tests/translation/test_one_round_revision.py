@@ -11,7 +11,11 @@ import pytest
 
 from image_translation.translation.base import Translator
 from image_translation.translation.chapter_chunking import collect_blocks
-from image_translation.translation.config import StructuredConfig, TranslationConfig
+from image_translation.translation.config import (
+    GlossaryEntry,
+    StructuredConfig,
+    TranslationConfig,
+)
 from image_translation.translation.exceptions import (
     StructuredTranslationError,
     TranslationInputError,
@@ -175,6 +179,108 @@ class TestMixedGrouping:
                 fake, StructuredConfig(), TranslationConfig()
             ).translate(html).translated_html
             assert ("click" in out) or ("middle" in out) or ("English span" in out)
+
+    def test_every_category_restored_against_changing_model(self):
+        """The mandated audit: a fake model that rewrites EVERY unprotected
+        English word to GARBAGE must not affect the output — all protected
+        categories are restored from the ORIGINAL source text."""
+        class TotalCorruptionFake(FakeTranslator):
+            def translate_batch_texts(self, texts, source_lang="zh",
+                                      target_lang="en", max_new_tokens=None):
+                out = []
+                for t in texts:
+                    self.call_count += 1
+                    # corrupt every word OUTSIDE placeholders
+                    parts = re.split(r"(__IT[A-Z0-9]*_[A-Z]\d{4}_)", t)
+                    parts = [
+                        re.sub(r"[A-Za-z0-9]{2,}", "GARBAGE", p)
+                        if not p.startswith("__IT") else p
+                        for p in parts
+                    ]
+                    translated = re.sub(
+                        r"[\u4e00-\u9fff]+", lambda m: "EN:" + m.group(0),
+                        "".join(parts),
+                    )
+                    out.append(TranslationResult(
+                        source_text=t, translated_text=translated,
+                        model_name="fake", device="cpu",
+                    ))
+                return out
+
+        cfg = StructuredConfig(glossary=(
+            GlossaryEntry("充电器", "Charger"),
+        ))
+        html = (
+            "<p>Please click the button 请继续。</p>"                     # ordinary English
+            "<p>请 <strong>click</strong> 这里 <em>now</em> 谢谢。</p>"    # English around inline tags
+            "<p>产品编号 ABC-123 已发货。</p>"                           # product code
+            "<p>访问 https://example.com/x?q=1 获取详情。</p>"           # URL
+            "<p>联系 support@example.com 获取帮助。</p>"                 # email
+            "<p>电缆长度 1.5 meters 支持 20V/5A 快充。</p>"              # measurements
+            "<p>支持 Windows 11 和 iPhone 16 Pro。</p>"                  # versions
+            "<p>本充电器支持快充协议。</p>"                              # glossary term
+        )
+        res = StructuredTranslator(TotalCorruptionFake(), cfg, None).translate(html)
+        out = res.translated_html
+        # the model's corruption must NEVER appear
+        assert "GARBAGE" not in out, f"model corruption leaked: {out}"
+        # every protected category restored exactly
+        for expected in (
+            "Please click the button",
+            "<strong>click</strong>",
+            "<em>now</em>",
+            "ABC-123",
+            "https://example.com/x?q=1",
+            "support@example.com",
+            "1.5 meters",
+            "20V/5A",
+            "Windows 11",
+            "iPhone 16 Pro",
+            "Charger",          # glossary target
+        ):
+            assert expected in out, f"{expected!r} missing in {out!r}"
+        # Chinese translated in place
+        assert "EN:" in out
+
+    def test_identifier_and_glossary_target_changes_restored(self):
+        """Adversarial fake emits changed identifier/glossary-looking text in
+        every slot: protected originals must be restored exactly and the
+        model's attempts can never REPLACE them (identifiers and glossary
+        targets never reach the model as free text)."""
+        class OverrideFake(FakeTranslator):
+            def translate_batch_texts(self, texts, source_lang="zh",
+                                      target_lang="en", max_new_tokens=None):
+                out = []
+                for t in texts:
+                    self.call_count += 1
+                    # every slot piece claims a changed identifier/target;
+                    # placeholders (the protected content) stay intact
+                    parts = re.split(r"(__IT[A-Z0-9]*_[A-Z]\d{4}_)", t)
+                    parts = [
+                        "USB-XX WrongTarget "
+                        if not p.startswith("__IT") else p
+                        for p in parts
+                    ]
+                    out.append(TranslationResult(
+                        source_text=t, translated_text="".join(parts),
+                        model_name="fake", device="cpu",
+                    ))
+                return out
+
+        cfg = StructuredConfig(glossary=(GlossaryEntry("充电器", "Charger"),))
+        html = (
+            "<p>型号 ABC-123 已发货，充电器支持快充。</p>"
+            "<p>访问 https://example.com 获取信息，本充电器兼容 Windows 11。</p>"
+        )
+        res = StructuredTranslator(OverrideFake(), cfg, None).translate(html)
+        out = res.translated_html
+        # protected originals restored exactly, exactly once each
+        assert out.count("ABC-123") == 1
+        assert out.count("https://example.com") == 1
+        assert out.count("Windows 11") == 1
+        assert out.count("Charger") == 2
+        # no placeholder token may leak into the output
+        assert "__ITRANSLATE" not in out
 
     def test_english_never_disappears(self):
         """Reconstruction never loses English-only block content."""
@@ -454,6 +560,31 @@ class TestStaticAudit:
                                 offenders.append(f"{p}:{i}")
         assert not offenders, f"truncation=True reintroduced: {offenders}"
 
+    def test_no_half_reachable_from_auto_precision(self):
+        """Fails if any production path can call model.half() from the
+        default 'auto' precision. FP32 is the quality baseline; float16 is
+        only an explicit opt-in (guarded by a 'float16' branch)."""
+        offenders = []
+        for d in self.PROD_DIRS:
+            for root, _dirs, files in __import__("os").walk(d):
+                for f in files:
+                    if f.endswith(".py"):
+                        p = __import__("os").path.join(root, f)
+                        lines = (
+                            open(p, encoding="utf-8").read().splitlines()
+                        )
+                        for i, line in enumerate(lines, 1):
+                            if ".half()" in line:
+                                prev = lines[i - 2] if i >= 2 else ""
+                                if "float16" not in line and "float16" not in prev:
+                                    offenders.append(
+                                        f"{p}:{i}: {line.strip()}"
+                                    )
+        assert not offenders, (
+            f"model.half() reachable outside an explicit float16 branch: "
+            f"{offenders}"
+        )
+
     def test_no_hardcoded_source_language_in_core_paths(self):
         """Fails if a production call site hard-codes the source language
         (defaults in function signatures are allowed; call sites must use
@@ -484,6 +615,35 @@ class TestStaticAudit:
         assert not offenders, (
             f"hard-coded source language at call sites: {offenders}"
         )
+
+    def test_no_vacuous_assertions_in_tests(self):
+        """Fails if any test contains an assertion that is always true or
+        always false (a vacuous check). Every assertion must express a real
+        invariant that fails when the implementation is wrong."""
+        offenders = []
+        test_dir = __import__("os").path.join(
+            __import__("os").path.dirname(__file__), ".."
+        )
+        test_dir = __import__("os").path.abspath(test_dir)
+        for root, _dirs, files in __import__("os").walk(test_dir):
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                p = __import__("os").path.join(root, f)
+                for i, line in enumerate(
+                    open(p, encoding="utf-8").read().splitlines(), 1
+                ):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if stripped.startswith(('"', "'")):
+                        continue  # string literals/docstrings
+                    if "\\b" in line:
+                        continue  # this audit's own pattern literal
+                    if re.search(r"assert True\b|assert False\b| or True\b",
+                                 line):
+                        offenders.append(f"{p}:{i}: {line.strip()}")
+        assert not offenders, f"vacuous test assertions: {offenders}"
 
     def test_no_unused_advertised_configuration(self):
         """Every StructuredConfig field must be consumed by production code

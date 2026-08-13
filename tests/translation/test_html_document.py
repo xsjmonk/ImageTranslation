@@ -21,24 +21,29 @@ class TestRoundTrip:
         assert 'data-id="42"' in out
         assert out.startswith("<a")
 
-    def test_attribute_quoting_normalized(self):
-        """Single-quoted attributes are re-emitted with double quotes."""
+    def test_attribute_spelling_preserved(self):
+        """Valid input: attribute spelling (quoting, case) round-trips
+        exactly via the lexical raw-tag layer."""
         html = "<img src='pic.jpg'>"
         doc = HTMLDocument(html)
-        assert '<img src="pic.jpg">' == doc.serialize()
+        assert html == doc.serialize()
 
     def test_void_elements(self):
         html = "<p>line1<br>line2<img src='a.png'>end</p>"
         doc = HTMLDocument(html)
-        out = doc.serialize()
-        assert "<br>" in out
-        assert '<img src="a.png">' in out
+        assert doc.serialize() == html
 
-    def test_self_closing_normalized(self):
-        """HTML5 canonicalization: <br/> and <br> both become <br>."""
-        html = "<br/>"
+    def test_self_closing_spelling_preserved(self):
+        """Exact lexical preservation: <br/> stays <br/>, <br> stays <br>."""
+        assert HTMLDocument("<br/>").serialize() == "<br/>"
+        assert HTMLDocument("<br>").serialize() == "<br>"
+
+    def test_malformed_markup_canonicalized(self):
+        """Normalization boundary: malformed input (implied/stray tags)
+        falls back to the parser's canonical serialization."""
+        html = "<p>a<span>b<p>c</p>"  # implied </span>, </p>
         doc = HTMLDocument(html)
-        assert doc.serialize() == "<br>"
+        assert doc.serialize() == "<p>a<span>b</span></p><p>c</p>"
 
     def test_comments_preserved(self):
         html = "<!-- 中文注释 --><p>text</p>"
@@ -50,15 +55,55 @@ class TestRoundTrip:
         doc = HTMLDocument(html)
         assert doc.serialize().startswith("<!DOCTYPE html>")
 
-    def test_entities_decoded_then_reserialized(self):
-        """HTML5 parsing decodes character references; the semantic content
-        (and <, >, & re-escaped on output) is preserved — not bytes."""
-        html = "<p>a &amp; b &lt;c&gt; &#233;</p>"
+    def test_entities_preserved_exact_spelling(self):
+        """Lexical preservation: character references round-trip in their
+        EXACT source spelling — never decoded, never normalized."""
+        html = "<p>a &amp; b &lt;c&gt; &#233; &nbsp; &#xA0;</p>"
         doc = HTMLDocument(html)
-        out = doc.serialize()
-        assert "&amp;" in out          # & re-escaped
-        assert "&lt;c&gt;" in out      # <c> re-escaped
-        assert "é" in out              # &#233; decoded to é
+        assert doc.serialize() == html
+        # no decode happened anywhere in the tree
+        for node in doc.text_nodes():
+            assert "é" not in node.text
+            assert "\xa0" not in node.text
+
+    def test_entity_never_becomes_markup(self):
+        """&lt;br&gt; is literal text; it never produces a <br> element."""
+        doc = HTMLDocument("<p>中文&lt;br&gt;English</p>")
+        assert [e.tag for e in doc.element_nodes() if e.tag != "#document"] == ["p"]
+        assert doc.serialize() == "<p>中文&lt;br&gt;English</p>"
+
+    def test_quoted_gt_inside_attribute(self):
+        """A '>' inside a quoted attribute value is not a tag terminator."""
+        html = '<p title="a > b">中文</p>'
+        doc = HTMLDocument(html)
+        assert doc.serialize() == html
+        p = [e for e in doc.element_nodes() if e.tag == "p"][0]
+        assert p.attrs == [("title", "a > b")]
+
+    def test_repeated_identical_entities(self):
+        """Every occurrence of the same entity keeps its own marker and is
+        restored exactly — no deduplication, no count loss."""
+        html = "<p>&nbsp;中文&nbsp;English&nbsp;结尾&nbsp;</p>"
+        doc = HTMLDocument(html)
+        assert doc.serialize() == html
+        assert doc.serialize().count("&nbsp;") == 4
+        # markers are distinct per occurrence
+        markers = {n.text for n in doc.text_nodes() if "\x02" in n.text}
+        assert len(markers) == 1  # one text node holds all four markers
+
+    def test_whitespace_sensitive_attributes(self):
+        """Attribute whitespace is preserved exactly via the raw tag
+        spelling (valid input)."""
+        html = '<p class="a  b" data-x=" spaced ">中文</p>'
+        doc = HTMLDocument(html)
+        assert doc.serialize() == html
+
+    def test_entities_in_attributes_preserved(self):
+        """Entity spellings inside attribute values round-trip exactly via
+        the raw tag spelling (valid input)."""
+        html = '<a href="/x?a=1&amp;b=2" title="a&#160;b">链接</a>'
+        doc = HTMLDocument(html)
+        assert doc.serialize() == html
 
     def test_whitespace_and_newlines_preserved(self):
         html = "<p>  加厚\n防水 面料  </p>"

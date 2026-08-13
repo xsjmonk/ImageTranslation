@@ -134,24 +134,77 @@ class TestGlossaryTranslation:
             assert key in d, f"missing metric {key}"
 
     def test_consistency_validation_fails_closed(self, monkeypatch):
-        """If the output somehow misses a target term, the request fails."""
+        """If a glossary target is lost from the translated nodes, the
+        request fails (even though the serialized string is fine)."""
         fake = FakeTranslator()
         cfg = StructuredConfig(glossary=(GlossaryEntry("充电器", "Charger"),))
-        res = StructuredTranslator(fake, cfg, None).translate(
-            "<p>充电器支持快充。</p>"
-        )
-        # simulate a broken restore: remove a target occurrence
         with monkeypatch.context() as m:
             from image_translation.translation import structured_translation as st
             orig = st.rebuild_document
-            def broken(*a, **k):
-                out = orig(*a, **k)
-                return out.replace("Charger", "X", 1)
+            def broken(doc, *a, **k):
+                out = orig(doc, *a, **k)
+                # lose the glossary target inside the TRANSLATED node only
+                for node in doc.text_nodes():
+                    if "EN:" in node.text:  # translated node (fake wraps CJK)
+                        node.text = node.text.replace("Charger", "X", 1)
+                return out
             m.setattr(st, "rebuild_document", broken)
             with pytest.raises(StructuredTranslationError, match="terminology"):
                 StructuredTranslator(fake, cfg, None).translate(
                     "<p>充电器支持快充。</p>"
                 )
+
+    def test_excluded_target_text_cannot_mask_lost_occurrence(self, monkeypatch):
+        """Node-scoped validation: the target term pre-existing in EXCLUDED
+        HTML must not mask a lost glossary occurrence (a global substring
+        count would pass; the node-scoped count still fails)."""
+        fake = FakeTranslator()
+        cfg = StructuredConfig(glossary=(GlossaryEntry("充电器", "Charger"),))
+        # excluded block already contains the target term "Charger"
+        html = (
+            "<p>充电器支持快充。</p>"
+            "<div class='notranslate'>Charger 保持不变</div>"
+        )
+        with monkeypatch.context() as m:
+            from image_translation.translation import structured_translation as st
+            orig = st.rebuild_document
+            def broken(doc, *a, **k):
+                out = orig(doc, *a, **k)
+                # lose the glossary occurrence ONLY in the translated node;
+                # the excluded div keeps its "Charger" (would mask a global
+                # substring count)
+                for node in doc.text_nodes():
+                    if "EN:" in node.text:  # translated node (fake wraps CJK)
+                        node.text = node.text.replace("Charger", "X", 1)
+                return out
+            m.setattr(st, "rebuild_document", broken)
+            with pytest.raises(StructuredTranslationError, match="terminology"):
+                StructuredTranslator(fake, cfg, None).translate(html)
+
+    def test_untouched_english_target_lookalike_cannot_mask_loss(self, monkeypatch):
+        """A target-looking string in UNTOUCHED English (an all-English
+        block that is never sent to the model) must not mask a lost glossary
+        occurrence in the translated nodes."""
+        fake = FakeTranslator()
+        cfg = StructuredConfig(glossary=(GlossaryEntry("充电器", "Charger"),))
+        html = (
+            "<p>充电器支持快充。</p>"
+            "<p>The Charger is ready for shipping.</p>"  # all-English block
+        )
+        with monkeypatch.context() as m:
+            from image_translation.translation import structured_translation as st
+            orig = st.rebuild_document
+            def broken(doc, *a, **k):
+                out = orig(doc, *a, **k)
+                # lose the glossary occurrence ONLY in the translated node;
+                # the untouched English block keeps its "Charger" lookalike
+                for node in doc.text_nodes():
+                    if "EN:" in node.text:  # translated node (fake wraps CJK)
+                        node.text = node.text.replace("Charger", "X", 1)
+                return out
+            m.setattr(st, "rebuild_document", broken)
+            with pytest.raises(StructuredTranslationError, match="terminology"):
+                StructuredTranslator(fake, cfg, None).translate(html)
 
     def test_latin_term_not_corrupted_in_english_text(self):
         """exact=True protects latin words: glossary 'USB' must not rewrite

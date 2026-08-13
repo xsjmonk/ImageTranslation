@@ -203,6 +203,10 @@ def rebuild_document(
                     f"{attr_name} missing on element {elem_id}"
                 )
             elem.attrs = attrs
+            # The raw source spelling carried the ORIGINAL attribute value;
+            # the translated value must be serialized instead.
+            elem.raw_start = None
+            elem.raw_end = None
 
     translated_html = doc.serialize()
 

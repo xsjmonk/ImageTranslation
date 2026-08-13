@@ -254,3 +254,114 @@ class TestBatchTranslation:
         from image_translation.translation.m2m100_translator import M2M100Translator
         t = M2M100Translator(TranslationConfig())
         assert t.translate_batch_texts([]) == []
+
+
+class TestActiveGenerationPath:
+    """Prove the ACTIVE M2M100 generation path (not just config defaults):
+    the exact kwargs passed to tokenizer() and model.generate()."""
+
+    def _stub_translator(self):
+        import torch
+        from image_translation.translation.m2m100_translator import (
+            M2M100Translator,
+        )
+
+        cfg = TranslationConfig()  # precision="auto", num_beams=4
+        translator = M2M100Translator(cfg)
+        captured = {}
+
+        class FakeTokenizer:
+            def __init__(self):
+                self.src_lang = None
+
+            def get_lang_id(self, lang):
+                return {"zh": 128102, "en": 128022, "fr": 128014}.get(lang, -1)
+
+            def __call__(self, texts, return_tensors=None, padding=None,
+                         truncation=None):
+                captured["tokenize_kwargs"] = {
+                    "texts": list(texts),
+                    "return_tensors": return_tensors,
+                    "padding": padding,
+                    "truncation": truncation,
+                }
+                ids = torch.tensor([[128102, 1, 2]])
+                return {
+                    "input_ids": ids,
+                    "attention_mask": torch.ones_like(ids),
+                }
+
+            def batch_decode(self, sequences, skip_special_tokens=None):
+                captured["decode_kwargs"] = {
+                    "skip_special_tokens": skip_special_tokens,
+                }
+                return ["Hello", "Bonjour"][: len(sequences)]
+
+        class FakeParam:
+            dtype = torch.float32
+
+        class FakeModel:
+            class Config:
+                max_position_embeddings = 1024
+
+            config = Config()
+
+            def parameters(self):
+                return iter([FakeParam()])
+
+            def generate(self, **kwargs):
+                captured["generate_kwargs"] = kwargs
+                return torch.tensor([[2, 128022, 3]])
+
+        translator._tokenizer = FakeTokenizer()
+        translator._model = FakeModel()
+        translator._device_str = "cpu"
+        translator._precision_str = "float32"
+        return translator, captured
+
+    def test_tokenizer_receives_truncation_false(self):
+        translator, captured = self._stub_translator()
+        translator.translate_text("你好")
+        assert captured["tokenize_kwargs"]["truncation"] is False
+        assert captured["tokenize_kwargs"]["padding"] is True
+
+    def test_generate_receives_forced_bos_and_beams(self):
+        translator, captured = self._stub_translator()
+        translator.translate_text("你好", source_lang="zh", target_lang="fr")
+        kw = captured["generate_kwargs"]
+        # forced_bos_token_id resolved from the REQUEST target language
+        assert kw["forced_bos_token_id"] == 128014  # fr
+        assert kw["num_beams"] == 4
+        assert kw["max_new_tokens"] == 256  # GenerationConfig default
+        assert "input_ids" in kw and "attention_mask" in kw
+
+    def test_generate_has_no_no_repeat_ngram_size(self):
+        translator, captured = self._stub_translator()
+        translator.translate_text("你好")
+        assert "no_repeat_ngram_size" not in captured["generate_kwargs"]
+
+    def test_auto_precision_never_calls_half(self):
+        from image_translation.translation.m2m100_translator import (
+            M2M100Translator,
+        )
+        translator = M2M100Translator(TranslationConfig(precision="auto"))
+
+        class Model:
+            def half(self):
+                raise AssertionError("model.half() called under precision=auto")
+
+        assert translator._resolve_precision(Model(), "cpu") == "float32"
+
+    def test_explicit_float16_calls_half(self):
+        from image_translation.translation.m2m100_translator import (
+            M2M100Translator,
+        )
+        translator = M2M100Translator(TranslationConfig(precision="float16"))
+        calls = []
+
+        class Model:
+            def half(self):
+                calls.append("half")
+
+        assert translator._resolve_precision(Model(), "cpu") == "float16"
+        assert calls == ["half"]
