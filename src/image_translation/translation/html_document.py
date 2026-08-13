@@ -24,7 +24,9 @@ Parser (documented policy):
   deterministically per the HTML5 algorithm (never rejected, never regex):
     * stray end tags are ignored (``<p>a</span>b`` -> ``<p>ab</p>``);
     * implied end tags are applied (``<p>a<div>b`` -> ``<p>a</p><div>b</div>``);
-    * attribute names are lowercased, values entity-decoded;
+    * attribute names are lowercased and values entity-decoded in the
+      PARSED TREE only; the lexical layer restores the exact source
+      spelling on output (valid input).
 - Script/style contents are raw-text: kept verbatim, never parsed as markup.
 
 Serializer guarantee (documented):

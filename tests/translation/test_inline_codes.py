@@ -349,6 +349,33 @@ class TestAdversarialEntityFakes:
         assert "&amp;nbsp;" in out          # escaped to text
         assert len(re.findall(r"<br(?!/)>", out)) == 0  # never a real tag
 
+    def test_model_never_receives_raw_tags_or_entities(self):
+        """Invariant: every model-facing source contains ONLY translatable
+        text and placeholder tokens — no raw tag/entity characters can
+        reach the model as free text."""
+        html = (
+            "<p>中文<strong>加厚</strong>English&amp;AT&T<a "
+            "href=\"/x?a=1&amp;b=2\">链接</a><br>结尾&nbsp;。</p>"
+            "<p>型号 X13&nbsp;与 X1300&#160;兼容，功耗 &lt; 5W&amp;稳定。</p>"
+            "<script>var s = \"<b>&nbsp;\";</script>"
+        )
+        doc = HTMLDocument(html)
+        for budget in (30, 450):
+            segments = segment_blocks(
+                doc, collect_blocks(doc),
+                lambda t: max(1, (len(t) + 1) // 2), budget,
+            )
+            assert segments
+            for seg in segments:
+                src = seg.source_text
+                # the source contains only placeholder tokens + CJK text
+                assert "<" not in src, f"raw '<' reached model: {src!r}"
+                assert ">" not in src, f"raw '>' reached model: {src!r}"
+                assert "&" not in src, f"raw '&' reached model: {src!r}"
+                assert "\x02" not in src and "\x03" not in src
+                # placeholder tokens are present and well-formed
+                assert re.search(r"__ITRANSLATE_[A-Z]\d{4}_", src)
+
     def test_crashing_model_fails_closed_no_partial(self):
         """If every attempt (and the fallback) crashes, the request fails
         with a structured error — no partial HTML is returned."""

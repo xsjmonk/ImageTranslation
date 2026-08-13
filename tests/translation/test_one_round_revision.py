@@ -619,7 +619,18 @@ class TestStaticAudit:
     def test_no_vacuous_assertions_in_tests(self):
         """Fails if any test contains an assertion that is always true or
         always false (a vacuous check). Every assertion must express a real
-        invariant that fails when the implementation is wrong."""
+        invariant that fails when the implementation is wrong.
+
+        The detector's own pattern is assembled from string fragments so
+        this file contains no literal occurrence of the pattern it scans
+        for — it excludes only itself, not other tests."""
+        # Build the pattern from fragments: no source line here contains
+        # the literal scanned text, so this audit cannot flag itself.
+        vacuous = re.compile(
+            "assert " "True\\b"
+            "|assert " "False\\b"
+            "| or " "True\\b"
+        )
         offenders = []
         test_dir = __import__("os").path.join(
             __import__("os").path.dirname(__file__), ".."
@@ -633,15 +644,9 @@ class TestStaticAudit:
                 for i, line in enumerate(
                     open(p, encoding="utf-8").read().splitlines(), 1
                 ):
-                    stripped = line.strip()
-                    if stripped.startswith("#"):
-                        continue
-                    if stripped.startswith(('"', "'")):
-                        continue  # string literals/docstrings
-                    if "\\b" in line:
-                        continue  # this audit's own pattern literal
-                    if re.search(r"assert True\b|assert False\b| or True\b",
-                                 line):
+                    if line.strip().startswith("#"):
+                        continue  # comments
+                    if vacuous.search(line):
                         offenders.append(f"{p}:{i}: {line.strip()}")
         assert not offenders, f"vacuous test assertions: {offenders}"
 

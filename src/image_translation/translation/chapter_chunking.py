@@ -9,10 +9,11 @@ Segmentation order (documented):
 
 Protected-span translation (documented):
 - every text node is split into explicit ``Run`` records: ``chinese`` spans
-  (translated), ``english_protected`` / ``identifier_protected`` spans and
-  ``tag`` runs (replaced with collision-resistant tokens BEFORE inference
-  and restored from the ORIGINAL text afterwards — the model can never
-  rewrite English or identifiers);
+  (translated), ``english_protected`` / ``identifier_protected`` /
+  ``model_number_protected`` / ``entity_protected`` spans and ``tag`` runs
+  (replaced with collision-resistant tokens BEFORE inference and restored
+  from the ORIGINAL text afterwards — the model can never rewrite English,
+  identifiers, entities, or markup);
 - a ``Run`` carries node_id, kind, original raw text, protected text,
   placeholder token, source character offsets, and slot index;
 - segments record the exact source layout: ``slots`` (text between
