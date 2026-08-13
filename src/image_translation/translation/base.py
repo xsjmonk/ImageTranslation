@@ -36,7 +36,11 @@ class Translator(ABC):
 
     @abstractmethod
     def translate_batch_texts(
-        self, texts: Sequence[str], source_lang: str = "zh", target_lang: str = "en"
+        self,
+        texts: Sequence[str],
+        source_lang: str = "zh",
+        target_lang: str = "en",
+        max_new_tokens: int | None = None,
     ) -> List[TranslationResult]:
         """Translate multiple strings in one batch.
 
@@ -44,6 +48,8 @@ class Translator(ABC):
             texts: Source texts.
             source_lang: Source language code.
             target_lang: Target language code.
+            max_new_tokens: Optional per-call target budget override;
+                None uses the engine's configured default.
 
         Returns:
             List of TranslationResults, same order as input.

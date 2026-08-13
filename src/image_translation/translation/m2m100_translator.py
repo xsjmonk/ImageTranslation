@@ -11,6 +11,7 @@ from .config import TranslationConfig
 from .exceptions import (
     TranslationConfigurationError,
     TranslationDeviceError,
+    TranslationInputError,
     TranslationModelLoadError,
 )
 from .models import TranslationResult, TranslationRuntimeInfo
@@ -74,7 +75,11 @@ class M2M100Translator(Translator):
         return self._translate_impl([cleaned], source_lang, target_lang)[0]
 
     def translate_batch_texts(
-        self, texts: Sequence[str], source_lang: str = "zh", target_lang: str = "en"
+        self,
+        texts: Sequence[str],
+        source_lang: str = "zh",
+        target_lang: str = "en",
+        max_new_tokens: int | None = None,
     ) -> List[TranslationResult]:
         """Translate multiple strings with real GPU batching.
 
@@ -94,7 +99,11 @@ class M2M100Translator(Translator):
         batch_size = self._config.batch_size
         for i in range(0, len(cleaned), batch_size):
             chunk = cleaned[i : i + batch_size]
-            results.extend(self._translate_impl(chunk, source_lang, target_lang))
+            results.extend(
+                self._translate_impl(
+                    chunk, source_lang, target_lang, max_new_tokens=max_new_tokens
+                )
+            )
         return results
 
     def warmup(self) -> None:
@@ -179,6 +188,27 @@ class M2M100Translator(Translator):
         if self._config.model_cache_dir:
             cache_kwargs["cache_dir"] = self._config.model_cache_dir
 
+        # --- Diagnostics: resolve the actual cached checkpoint path ---
+        try:
+            from huggingface_hub import snapshot_download
+            resolved_path = snapshot_download(
+                self._config.model_name,
+                local_files_only=True,
+                **(cache_kwargs if self._config.model_cache_dir else {}),
+            )
+            logger.debug(
+                "DIAG model_name=%s checkpoint_path=%s cache_dir=%s",
+                self._config.model_name,
+                resolved_path,
+                self._config.model_cache_dir or "HF default",
+            )
+        except Exception as e:
+            logger.debug(
+                "DIAG could not resolve cached checkpoint for %s: %s",
+                self._config.model_name,
+                e,
+            )
+
         try:
             tokenizer = M2M100Tokenizer.from_pretrained(
                 self._config.model_name, **cache_kwargs
@@ -219,31 +249,28 @@ class M2M100Translator(Translator):
         logger.info("[INFO] Model ready.")
 
     def _resolve_precision(self, model, device_str: str) -> str:
-        """Apply precision strategy and return the effective precision name."""
+        """Apply precision strategy and return the effective precision name.
+
+        'auto' always resolves to FP32: quality is the priority while the
+        FP32 baseline is being established. Lower precision (float16) is
+        only applied when explicitly requested.
+        """
         precision = self._config.precision
-        if precision == "auto":
-            try:
-                import torch
-                if device_str.startswith("cuda") and torch.cuda.is_available():
-                    cap = torch.cuda.get_device_capability(self._config.cuda_device)
-                    if cap[0] >= 7:  # Volta or newer supports fp16 well
-                        model.half()
-                        return "float16"
-            except Exception:
-                pass
-            return "float32"
-        elif precision == "float16":
+        if precision == "float16":
             model.half()
             return "float16"
-        else:
-            return "float32"
+        return "float32"
 
     # ------------------------------------------------------------------
     # Internal: batched inference (official M2M100 generation pattern)
     # ------------------------------------------------------------------
 
     def _translate_impl(
-        self, texts: Sequence[str], source_lang: str, target_lang: str
+        self,
+        texts: Sequence[str],
+        source_lang: str,
+        target_lang: str,
+        max_new_tokens: int | None = None,
     ) -> List[TranslationResult]:
         """Translate a chunk of texts in one GPU batch.
 
@@ -257,6 +284,7 @@ class M2M100Translator(Translator):
         model = self._model
         device_str = self._device_str
         gen_cfg = self._config.generation
+        target_budget = max_new_tokens if max_new_tokens is not None else gen_cfg.max_new_tokens
 
         target_lang_id = tokenizer.get_lang_id(target_lang)
 
@@ -268,22 +296,71 @@ class M2M100Translator(Translator):
                 list(texts),
                 return_tensors="pt",
                 padding=True,
-                truncation=True,
+                truncation=False,
             )
+
+            # --- Explicit over-budget rejection: no silent truncation ---
+            # The structured path validates budgets before generation; this
+            # is the final hard guard (model context window minus target
+            # budget). Plain text beyond the model window fails explicitly.
+            actual_tokens = encoded["input_ids"].shape[1]
+            ceiling = model.config.max_position_embeddings - target_budget - 8
+            if actual_tokens > ceiling:
+                raise TranslationInputError(
+                    f"input exceeds model token budget: measured {actual_tokens} "
+                    f"source tokens, ceiling {ceiling} "
+                    f"(max_position_embeddings={model.config.max_position_embeddings}, "
+                    f"target_budget={target_budget}); text was NOT truncated"
+                )
+
+            # --- Diagnostics (debug): tokenizer output before moving ---
+            logger.debug(
+                "DIAG source_lang=%s target_lang=%s forced_bos_token_id=%s "
+                "input_ids=%s attention_mask=%s token_count=%s decoded_source=%r",
+                source_lang,
+                target_lang,
+                target_lang_id,
+                encoded["input_ids"].tolist(),
+                encoded.get("attention_mask").tolist()
+                if encoded.get("attention_mask") is not None else None,
+                actual_tokens,
+                tokenizer.batch_decode(encoded["input_ids"], skip_special_tokens=True),
+            )
+
             # Move every tensor to the device
             encoded = {
                 key: value.to(device_str)
                 for key, value in encoded.items()
             }
 
+            # --- Diagnostics (debug): dtype/device before generation ---
+            logger.debug(
+                "DIAG model_dtype=%s input_dtype=%s device=%s precision=%s "
+                "num_beams=%s max_new_tokens=%s length_penalty=%s early_stopping=%s "
+                "no_repeat_ngram_size=unset",
+                next(model.parameters()).dtype,
+                encoded["input_ids"].dtype,
+                device_str,
+                self._precision_str,
+                gen_cfg.num_beams,
+                gen_cfg.max_new_tokens,
+                gen_cfg.length_penalty,
+                gen_cfg.early_stopping,
+            )
+
             generated = model.generate(
                 **encoded,
                 forced_bos_token_id=target_lang_id,
-                max_new_tokens=gen_cfg.max_new_tokens,
+                max_new_tokens=target_budget,
                 num_beams=gen_cfg.num_beams,
                 length_penalty=gen_cfg.length_penalty,
                 early_stopping=gen_cfg.early_stopping if gen_cfg.num_beams > 1 else False,
-                no_repeat_ngram_size=3,
+            )
+
+            # --- Diagnostics (debug): raw generated token IDs before decode ---
+            logger.debug(
+                "DIAG generated_ids=%s",
+                [g.tolist() for g in generated],
             )
 
             decoded = tokenizer.batch_decode(

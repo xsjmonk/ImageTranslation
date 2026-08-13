@@ -125,7 +125,8 @@ class TestTranslationConfig:
     def test_generation_config_defaults(self):
         gen = GenerationConfig()
         assert gen.max_new_tokens == 256
-        assert gen.num_beams == 1
+        assert gen.num_beams == 4
+        assert gen.length_penalty == 1.0
 
     def test_batch_size_positive(self):
         with pytest.raises(ValueError, match="batch_size"):
@@ -222,7 +223,7 @@ class TestBatchTranslation:
 
         calls: list[list[str]] = []
 
-        def fake_impl(texts, source_lang, target_lang):
+        def fake_impl(texts, source_lang, target_lang, max_new_tokens=None):
             calls.append(list(texts))
             return [
                 TranslationResult(

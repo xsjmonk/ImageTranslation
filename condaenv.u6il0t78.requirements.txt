@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.12.1
+transformers
+sentencepiece
+sacremoses
+huggingface-hub
+html5lib
+fastapi
+uvicorn[standard]
+paddlepaddle==3.2.0
+paddleocr>=3.3,<4
+rapidfuzz>=3.9
+ftfy>=6.2
+regex>=2024.7

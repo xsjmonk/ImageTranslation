@@ -8,6 +8,21 @@
   "runtime": {
     "warmup_on_start": true
   },
+  "structured": {
+    "enabled": true,
+    "max_chapter_characters": 100000,
+    "max_segment_tokens": 450,
+    "max_target_tokens": 400,
+    "context_window_tokens": 0,
+    "glossary": [],
+    "translatable_attributes": [],
+    "excluded_tags": ["script", "style", "code", "pre"],
+    "excluded_classes": ["notranslate"],
+    "segment_warning_seconds": 60.0,
+    "max_total_seconds": 600.0,
+    "max_retries_per_segment": 1,
+    "concurrency": 1
+  },
   "translation": {
     "model_name": "facebook/m2m100_418M",
     "source_language": "zh",
@@ -20,7 +35,7 @@
     "max_input_characters": 4000,
     "generation": {
       "max_new_tokens": 256,
-      "num_beams": 1,
+      "num_beams": 4,
       "length_penalty": 1.0,
       "early_stopping": true
     }

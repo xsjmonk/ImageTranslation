@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from image_translation.translation.config import GenerationConfig, TranslationConfig
+from image_translation.translation.config import (
+    GenerationConfig,
+    GlossaryEntry,
+    StructuredConfig,
+    TranslationConfig,
+)
 
 _VALID_LOG_LEVELS = {"critical", "error", "warning", "info", "debug", "trace"}
 
@@ -41,6 +46,7 @@ class TranslationServerConfig:
     """Root config for the standalone translation server."""
     server: ServerConfig = field(default_factory=ServerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    structured: StructuredConfig = field(default_factory=StructuredConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
 
 
@@ -138,11 +144,42 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         warmup_on_start=runtime_raw.get("warmup_on_start", True),
     )
 
+    structured_raw = raw.get("structured", {})
+    glossary_raw = structured_raw.get("glossary", ()) or ()
+    glossary = tuple(
+        GlossaryEntry(
+            source=entry["source"],
+            target=entry["target"],
+            exact=bool(entry.get("exact", True)),
+        )
+        for entry in glossary_raw
+    )
+    structured = StructuredConfig(
+        enabled=structured_raw.get("enabled", True),
+        max_chapter_characters=structured_raw.get("max_chapter_characters", 100_000),
+        max_segment_tokens=structured_raw.get("max_segment_tokens", 450),
+        max_target_tokens=structured_raw.get("max_target_tokens", 400),
+        context_window_tokens=structured_raw.get("context_window_tokens", 0),
+        glossary=glossary,
+        translatable_attributes=tuple(
+            structured_raw.get("translatable_attributes", ())
+        ),
+        excluded_tags=tuple(structured_raw.get("excluded_tags", ("script", "style", "code", "pre"))),
+        excluded_classes=tuple(structured_raw.get("excluded_classes", ("notranslate",))),
+        segment_warning_seconds=structured_raw.get(
+            "segment_warning_seconds",
+            structured_raw.get("max_segment_seconds", 60.0),
+        ),
+        max_total_seconds=structured_raw.get("max_total_seconds", 600.0),
+        max_retries_per_segment=structured_raw.get("max_retries_per_segment", 1),
+        concurrency=structured_raw.get("concurrency", 1),
+    )
+
     trans_raw = raw.get("translation", {})
     gen_raw = trans_raw.get("generation", {})
     generation = GenerationConfig(
         max_new_tokens=gen_raw.get("max_new_tokens", 256),
-        num_beams=gen_raw.get("num_beams", 1),
+        num_beams=gen_raw.get("num_beams", 4),
         length_penalty=gen_raw.get("length_penalty", 1.0),
         early_stopping=gen_raw.get("early_stopping", True),
     )
@@ -161,6 +198,11 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         model_cache_dir=trans_raw.get("model_cache_dir"),
     )
 
-    config = TranslationServerConfig(server=server, runtime=runtime, translation=translation)
+    config = TranslationServerConfig(
+        server=server,
+        runtime=runtime,
+        structured=structured,
+        translation=translation,
+    )
     _validate(config)
     return config

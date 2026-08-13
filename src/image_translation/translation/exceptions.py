@@ -21,3 +21,8 @@ class TranslationDeviceError(TranslationError):
 
 class TranslationModelLoadError(TranslationError):
     """Failed to load the translation model or tokenizer."""
+
+
+class StructuredTranslationError(TranslationError):
+    """Structured (HTML) translation failed: parsing, protection, chunking,
+    reconstruction validation, or retry-exhausted failures."""

@@ -43,6 +43,8 @@ dependencies:
       - sentencepiece
       - sacremoses
       - huggingface-hub
+      # HTML5 parsing for the structured translation path
+      - html5lib
       # Standalone translation API
       - fastapi
       - uvicorn[standard]

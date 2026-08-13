@@ -1,27 +1,39 @@
 """API request/response models — thin FastAPI schemas for the HTTP boundary.
 
-The request model only validates the basic type. Actual content validation
-(empty/whitespace-only/length) is done by the shared translator using the
-configured maximum, so there is a single source of truth.
+Backward compatibility (documented):
+- `format` is optional and defaults to "plain"; existing callers that send
+  only {"text": ...} are unaffected.
+- format="plain" uses the current plain-text path.
+- format="html" uses the new structured (HTML-aware) path.
+- No auto-detection of HTML from "<"/">" characters.
+- Content validation (emptiness, length) is performed by the shared
+  translation layer using configured limits.
 """
 
 from __future__ import annotations
+
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
 
 class TranslateRequest(BaseModel):
-    """POST /translate request body.
-
-    Only type validation here; content validation happens in the shared
-    translator (stripped emptiness, configured max length).
-    """
-    text: str = Field(..., description="Text to translate (zh → en)")
+    """POST /translate request body."""
+    text: str = Field(..., description="Text or HTML chapter to translate")
+    format: Literal["plain", "html"] = Field(
+        "plain", description="plain (default, backward compatible) or html"
+    )
+    source_language: Optional[str] = Field(
+        None, description="Optional source language code (default: zh)"
+    )
+    target_language: Optional[str] = Field(
+        None, description="Optional target language code (default: en)"
+    )
 
 
 class TranslateResponse(BaseModel):
     """POST /translate response body."""
-    translation: str = Field(..., description="Translated English text")
+    translation: str = Field(..., description="Translated text or HTML")
 
 
 class HealthResponse(BaseModel):
@@ -35,3 +47,4 @@ class HealthResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """Standard safe JSON error envelope (no internals/tracebacks)."""
     error: str
+    correlation_id: str = ""
