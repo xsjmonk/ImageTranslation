@@ -209,9 +209,30 @@ Write-Host ""
 
 # ---- Live status watchdog ----
 $startTime = Get-Date
-$lastStatusLine = 0
+$lastStatusLine = -240      # forces the first periodic line at $FirstStatusAt
+$FirstStatusAt = 30         # first state line (incl. download indicator) ~30s
+$StatusInterval = 240       # periodic status refresh every 4 min (3-5 min range)
 $readySeen = $false
 $exitCode = $null
+
+function Get-ServerStateText {
+    param([bool]$HealthOk, [bool]$ModelReady)
+    if ($ModelReady) { return 'state RUNNING (model ready)' }
+    if ($HealthOk) { return 'state RUNNING (model loading ...)' }
+    # Tail the server log to detect an in-progress model download
+    # (translator logs 'Model cache MISS; downloading ...' and HF logs
+    # 'Fetching N files' / 'Downloading ...'; 'Model download COMPLETE'
+    # marks the end of the download phase).
+    $log = ''
+    if (Test-Path $ErrLog) {
+        $log = (Get-Content -Tail 40 $ErrLog -ErrorAction SilentlyContinue) -join "`n"
+    }
+    if ($log -match 'Model download COMPLETE') { return 'state model download complete; loading model ...' }
+    if ($log -match 'downloading|Fetching \d+ files|Downloading') {
+        return 'state DOWNLOADING model (first launch, ~1.7 GB) ...'
+    }
+    return 'state starting ...'
+}
 
 try {
     while (-not $proc.HasExited) {
@@ -227,10 +248,8 @@ try {
             $healthOk = $false
         }
 
-        $line = "[STATUS] uptime ${uptime}s | port $ServerPort | " +
-                $(if ($modelReady) { 'state RUNNING (model ready)' }
-                  elseif ($healthOk) { 'state RUNNING (model loading ...)' }
-                  else { 'state starting ...' }) +
+        $stateText = Get-ServerStateText -HealthOk $healthOk -ModelReady $modelReady
+        $line = "[STATUS] uptime ${uptime}s | port $ServerPort | $stateText" +
                 $(if ($modelReady) { " | $($health.model) | $($health.device)" } else { '' })
 
         if ($modelReady -and -not $readySeen) {
@@ -238,13 +257,14 @@ try {
             $secs = [int](New-TimeSpan -Start $startTime -End (Get-Date)).TotalSeconds
             Write-Host "[OK]   Server RUNNING on $ServerUrl (PID $($proc.Id), model $($health.model), device $($health.device), ready in ${secs}s)" -ForegroundColor Green
         }
-        elseif ($uptime -ge ($lastStatusLine + 150)) {
-            # Periodic status refresh while the server runs (every 2.5 min)
+        elseif ($uptime -ge ($lastStatusLine + $StatusInterval)) {
+            # Periodic status refresh (every 4 min)
             $lastStatusLine = $uptime
             Write-Host $line
         }
-        elseif (-not $readySeen -and $uptime -ge 15 -and $uptime % 15 -eq 0) {
-            # Slow start (first model download): keep the user informed
+        elseif (-not $readySeen -and $uptime -eq $FirstStatusAt) {
+            # First state announcement (e.g. model download started)
+            $lastStatusLine = $uptime
             Write-Host $line -ForegroundColor Yellow
         }
 
