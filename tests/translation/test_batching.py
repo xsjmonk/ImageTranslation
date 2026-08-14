@@ -104,6 +104,25 @@ class RecordingFake(Translator):
                 source_text=texts[0], translated_text=None,
                 model_name="fake", device="cpu",
             )
+        elif behavior == "bytes":
+            out[0] = TranslationResult(
+                source_text=texts[0], translated_text=b"bytes",
+                model_name="fake", device="cpu",
+            )
+        elif behavior == "missing_attr":
+            class _NoText:
+                __slots__ = ("source_text",)
+            dummy = _NoText()
+            dummy.source_text = texts[0]
+            out[0] = dummy
+        elif behavior == "none_collection":
+            out = None
+        elif behavior == "scalar_collection":
+            out = 42
+        elif behavior == "unsized_collection":
+            class _Unsized:
+                __slots__ = ()
+            out = _Unsized()
         self.elapsed += time.monotonic() - start
         return out
 
@@ -497,6 +516,91 @@ class TestBatchCardinality:
         assert res.segment_count == 8
         for i in range(4):
             assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_bytes_translated_text_recovered_individually(self):
+        fake, res = self._run({1: "bytes"})
+        assert res.segment_count == 8
+        for i in range(4):
+            assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_missing_attribute_result_recovered_individually(self):
+        fake, res = self._run({1: "missing_attr"})
+        assert res.segment_count == 8
+        for i in range(4):
+            assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_valid_neighbors_not_resent_when_item_isolated(self):
+        # Four distinct CJK paragraphs -> 4 segments -> one 4-item batch.
+        # Item 0 is None; the bad item is isolated and retried alone while
+        # the valid neighbors are preserved and never re-sent.
+        markers = "甲乙丙丁"
+        html = "".join(
+            f"<p>{c}内容。" + "中文内容，耐磨耐用。" * 4 + "</p>"
+            for c in markers
+        )
+        fake = RecordingFake(count_behaviors={1: "none"})
+        res = StructuredTranslator(
+            fake, StructuredConfig(max_segment_tokens=30, batch_size=4),
+            TranslationConfig(),
+        ).translate(html)
+        assert fake.call_sizes == [4, 1]  # 1 batch + 1 isolated retry
+        # the retried item is exactly the bad one, translated fresh
+        assert "甲内容。" in fake.call_texts[1][0]
+        # valid neighbors were kept from the batch, never re-sent
+        for idx, c in enumerate("乙丙丁", start=1):
+            assert f"{c}内容。" in fake.call_texts[0][idx]  # in the batch
+            assert not any(f"{c}内容。" in t for t in fake.call_texts[1]), (
+                f"neighbor {c} was re-sent"
+            )
+        # complete chapter, exact order, no leakage
+        for c in markers:
+            assert f"EN:{c}内容。" in res.translated_html
+        assert "__IT" not in res.translated_html
+        assert res.retry_count == 0 and res.fallback_count == 0
+
+    def test_persistent_malformed_fails_closed(self):
+        # Every call returns a malformed item -> the isolated retry also
+        # fails -> StructuredTranslationError, never a raw TypeError or
+        # partial HTML.
+        fake = RecordingFake(
+            count_behaviors={i: "malformed" for i in range(1, 60)}
+        )
+        with pytest.raises(StructuredTranslationError):
+            StructuredTranslator(
+                fake, StructuredConfig(max_segment_tokens=30, batch_size=4),
+                TranslationConfig(),
+            ).translate(self.HTML4)
+
+    def test_none_collection_recovered_individually(self):
+        fake, res = self._run({1: "none_collection"})
+        assert res.segment_count == 8
+        for i in range(4):
+            assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_scalar_collection_recovered_individually(self):
+        fake, res = self._run({1: "scalar_collection"})
+        assert res.segment_count == 8
+        for i in range(4):
+            assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_unsized_collection_recovered_individually(self):
+        fake, res = self._run({1: "unsized_collection"})
+        assert res.segment_count == 8
+        for i in range(4):
+            assert f"EN:第{i}EN:段" in res.translated_html
+
+    def test_persistent_invalid_collection_fails_closed(self):
+        # Every call returns None as the result collection -> whole-group
+        # recovery also fails -> StructuredTranslationError, never a raw
+        # TypeError/AttributeError or partial HTML.
+        fake = RecordingFake(
+            count_behaviors={i: "none_collection" for i in range(1, 60)}
+        )
+        with pytest.raises(StructuredTranslationError):
+            StructuredTranslator(
+                fake, StructuredConfig(max_segment_tokens=30, batch_size=4),
+                TranslationConfig(),
+            ).translate(self.HTML4)
 
     def test_persistent_cardinality_failure_fails_closed(self):
         # Every call returns zero results -> recovery cannot prove each

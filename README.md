@@ -132,6 +132,8 @@ With explicit config (relative paths resolve from the current directory):
 The first launch downloads the model (~1.7 GB). Subsequent starts are fast.  
 **Requires NVIDIA CUDA GPU** — defaults to `cuda:0` with no CPU fallback.
 
+**Remote access**: the default config binds `0.0.0.0` (all interfaces), so machines on the LAN can reach the server at `http://<this-machine-ip>:8091`. The start script lists the machine's remote URLs and prints a Windows Firewall hint. To restrict back to local-only, set `"host": "127.0.0.1"` in `translation-server.config.json`. For remote clients, allow inbound TCP on the configured port (e.g. `New-NetFirewallRule -DisplayName 'TranslationServer' -Direction Inbound -Protocol TCP -LocalPort 8091 -Action Allow`).
+
 ### Runtime configuration
 
 `translation-server.config.json`:

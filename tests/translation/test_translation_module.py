@@ -365,3 +365,97 @@ class TestActiveGenerationPath:
 
         assert translator._resolve_precision(Model(), "cpu") == "float16"
         assert calls == ["half"]
+
+
+# ---------------------------------------------------------------------------
+# M2M100 decode cardinality: batch_decode must return exactly one output per
+# input; the plain batch path must never return a mismatched result count.
+# ---------------------------------------------------------------------------
+
+class TestM2M100DecodeCardinality:
+    @staticmethod
+    def _make_translator(decode_outputs):
+        from types import SimpleNamespace
+
+        import torch
+
+        from image_translation.translation.config import TranslationConfig
+        from image_translation.translation.m2m100_translator import M2M100Translator
+
+        t = M2M100Translator(TranslationConfig())
+
+        class FakeTokenizer:
+            src_lang = "zh"
+
+            def __call__(self, texts, return_tensors="pt", padding=False,
+                         truncation=False):
+                n = len(texts)
+                return {
+                    "input_ids": torch.zeros(n, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(n, 4, dtype=torch.long),
+                }
+
+            def get_lang_id(self, lang):
+                return 1
+
+            def batch_decode(self, generated, skip_special_tokens=True):
+                return decode_outputs
+
+        class FakeModel:
+            config = SimpleNamespace(max_position_embeddings=1024)
+
+            def eval(self):
+                return self
+
+            def generate(self, **kwargs):
+                return torch.zeros(len(kwargs["input_ids"]), 6, dtype=torch.long)
+
+            def parameters(self):
+                return iter([torch.zeros(1)])
+
+        t._tokenizer = FakeTokenizer()
+        t._model = FakeModel()
+        t._device_str = "cpu"
+        t._precision_str = "float32"
+        return t
+
+    def test_decode_zero_outputs_raises(self):
+        from image_translation.translation import TranslationError
+        t = self._make_translator([])
+        with pytest.raises(TranslationError, match="decoded outputs"):
+            t._translate_impl(["你好"], "zh", "en")
+
+    def test_decode_fewer_outputs_raises(self):
+        from image_translation.translation import TranslationError
+        t = self._make_translator(["hello"])
+        with pytest.raises(TranslationError, match="decoded outputs"):
+            t._translate_impl(["你好", "再见"], "zh", "en")
+
+    def test_decode_extra_outputs_raises(self):
+        from image_translation.translation import TranslationError
+        t = self._make_translator(["a", "b", "c"])
+        with pytest.raises(TranslationError, match="decoded outputs"):
+            t._translate_impl(["你好", "再见"], "zh", "en")
+
+    def test_decode_non_string_item_raises(self):
+        from image_translation.translation import TranslationError
+        t = self._make_translator(["hello", None])
+        with pytest.raises(TranslationError, match="non-string decoded"):
+            t._translate_impl(["你好", "再见"], "zh", "en")
+
+    def test_translate_batch_never_returns_wrong_count(self):
+        from image_translation.translation import TranslationError
+        # Correct decode -> exact count preserved
+        t = self._make_translator(["hello", "world"])
+        results = t.translate_batch_texts(["你好", "再见"])
+        assert len(results) == 2
+        assert results[0].translated_text == "hello"
+        assert results[1].translated_text == "world"
+        # Wrong decode count -> raises; no short/extra list is ever returned
+        t2 = self._make_translator(["only-one"])
+        with pytest.raises(TranslationError):
+            t2.translate_batch_texts(["你好", "再见"])
+        # Single text path also guarded
+        t3 = self._make_translator([])
+        with pytest.raises(TranslationError):
+            t3.translate_text("你好")

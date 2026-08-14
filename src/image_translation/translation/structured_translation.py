@@ -58,7 +58,7 @@ from .chapter_chunking import (
     segment_blocks,
 )
 from .config import GlossaryEntry, StructuredConfig, TranslationConfig
-from .exceptions import StructuredTranslationError
+from .exceptions import BatchItemError, StructuredTranslationError
 from .html_document import HTMLDocument
 from .html_protection import DEFAULT_PREFIX, ProtectionMap, assert_prefix_safe
 from .language_segments import LanguageKind, classify, protect_identifiers
@@ -85,6 +85,54 @@ def _budget_bucket(budget: int) -> int:
         if budget <= b:
             return b
     return budget
+
+
+def _validate_batch_results(results, expected_count: int) -> List[str]:
+    """Validate a translator result collection at the shared boundary.
+
+    - ``None`` / a scalar / a non-sized object are rejected with
+      StructuredTranslationError (no raw TypeError/AttributeError escapes);
+    - the exact result count is validated BEFORE any zip()/indexing;
+    - each item's ``translated_text`` must be a non-null string; malformed
+      items raise BatchItemError carrying the bad indices and the validated
+      outputs of the good neighbors so the caller can recover only the
+      affected inputs (valid neighbors are never re-sent).
+
+    Returns the validated translated strings in input order.
+    """
+    if results is None:
+        raise StructuredTranslationError(
+            "translator returned no result collection"
+        )
+    try:
+        actual_count = len(results)
+    except (TypeError, AttributeError) as exc:
+        raise StructuredTranslationError(
+            f"translator returned an invalid result collection: "
+            f"{type(results).__name__}"
+        ) from exc
+    if actual_count != expected_count:
+        raise StructuredTranslationError(
+            f"translator returned {actual_count} results for "
+            f"{expected_count} inputs"
+        )
+    bad_indices: List[int] = []
+    valid_outputs: Dict[int, str] = {}
+    for index, result in enumerate(results):
+        value = getattr(result, "translated_text", None)
+        if not isinstance(value, str):
+            bad_indices.append(index)
+            continue
+        valid_outputs[index] = value
+    if bad_indices:
+        raise BatchItemError(
+            f"translator returned non-string translated_text at batch "
+            f"item(s) {bad_indices}: "
+            f"{[type(results[i]).__name__ for i in bad_indices]}",
+            bad_indices,
+            valid_outputs,
+        )
+    return [valid_outputs[i] for i in range(actual_count)]
 
 # CJK ideographs only (for repeated-term reporting)
 _CJK_GRAM_RE = re.compile(r"^[\u4e00-\u9fff]+$")
@@ -414,18 +462,36 @@ class StructuredTranslator:
                     outputs = self._call_model(
                         texts, src_lang, tgt_lang, group_budget, deadline
                     )
+                    item_outputs: Optional[dict] = {
+                        i: out for i, out in enumerate(outputs)
+                    }
+                except BatchItemError as e:
+                    # Malformed item(s): the bad indices and the validated
+                    # outputs of the GOOD items are carried by the error, so
+                    # only the affected inputs are recovered individually —
+                    # successful neighbors are never re-sent.
+                    logger.warning(
+                        "batch item(s) %s malformed for correlation=%s "
+                        "batch=%d; recovering those item(s) individually, "
+                        "preserving %d valid neighbor(s)",
+                        e.bad_indices, correlation_id, batch_count,
+                        len(e.valid_outputs),
+                    )
+                    item_outputs: Optional[dict] = {
+                        i: e.valid_outputs.get(i)
+                        for i in range(len(group_segments))
+                    }
                 except StructuredTranslationError:
-                    # The whole batch call failed (model crash, malformed
-                    # result, or deadline): every segment of the batch is
-                    # retried individually.
+                    # The whole batch call failed (model crash or deadline):
+                    # every segment of the batch is retried individually.
                     logger.warning(
                         "batch call failed for correlation=%s batch=%d; "
                         "retrying %d segment(s) individually",
                         correlation_id, batch_count, len(group_segments),
                     )
-                    outputs = None
+                    item_outputs = None
 
-                if outputs is not None and len(outputs) != len(group_segments):
+                if item_outputs is not None and len(item_outputs) != len(group_segments):
                     # Explicit cardinality invariant: never zip away missing
                     # or surplus results. Recover every affected segment
                     # individually; if recovery cannot prove each segment
@@ -434,16 +500,22 @@ class StructuredTranslator:
                         "batch result count %d does not match input count %d "
                         "for correlation=%s batch=%d; recovering each "
                         "segment individually",
-                        len(outputs), len(group_segments),
+                        len(item_outputs), len(group_segments),
                         correlation_id, batch_count,
                     )
-                    outputs = None
+                    item_outputs = None
 
-                if outputs is None:
+                if item_outputs is None:
                     pending = [(seg, None) for seg in group_segments]
                 else:
                     pending = []
-                    for seg, out in zip(group_segments, outputs):
+                    for idx, seg in enumerate(group_segments):
+                        out = item_outputs.get(idx)
+                        if out is None:
+                            # This item's batch result was missing or
+                            # malformed: recovery starts a fresh call.
+                            pending.append((seg, None))
+                            continue
                         check = seg.protected_map.validate_output(
                             out, expected_order=seg.placeholder_order
                         )
@@ -836,23 +908,12 @@ class StructuredTranslator:
         except Exception as e:
             logger.exception("model call failed: %s", e)
             raise StructuredTranslationError("model call failed") from e
-        # Cardinality invariant: the translator must return exactly one
-        # result per input — never silently drop or add items.
-        if len(results) != len(texts):
-            raise StructuredTranslationError(
-                f"model returned {len(results)} results for "
-                f"{len(texts)} inputs"
-            )
-        # Item validity: every result must carry non-null string text.
-        out: List[str] = []
-        for r in results:
-            text = getattr(r, "translated_text", None)
-            if text is None or not isinstance(text, str):
-                raise StructuredTranslationError(
-                    "model returned an invalid result "
-                    "(None or malformed translated_text)"
-                )
-            out.append(text)
+        # Shared-boundary validation: rejects None / scalar / non-sized
+        # collections (no raw TypeError/AttributeError escapes), validates
+        # the exact result count BEFORE any zip()/indexing, and validates
+        # every item's translated_text is a non-null string — malformed
+        # items raise BatchItemError carrying the good neighbors' outputs.
+        out: List[str] = _validate_batch_results(results, len(texts))
         elapsed = time.monotonic() - start
         if elapsed > self._config.segment_warning_seconds:
             logger.warning(

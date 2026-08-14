@@ -11,6 +11,7 @@ from .config import TranslationConfig
 from .exceptions import (
     TranslationConfigurationError,
     TranslationDeviceError,
+    TranslationError,
     TranslationInputError,
     TranslationModelLoadError,
 )
@@ -103,6 +104,13 @@ class M2M100Translator(Translator):
                 self._translate_impl(
                     chunk, source_lang, target_lang, max_new_tokens=max_new_tokens
                 )
+            )
+        # Final accumulated-count invariant: the plain batch path must never
+        # silently return fewer (or more) translations than requested.
+        if len(results) != len(cleaned):
+            raise TranslationError(
+                f"translate_batch_texts accumulated {len(results)} results "
+                f"for {len(cleaned)} inputs"
             )
         return results
 
@@ -367,8 +375,22 @@ class M2M100Translator(Translator):
                 generated, skip_special_tokens=True
             )
 
+        # Decode cardinality invariant: batch_decode must return exactly one
+        # output per input — never silently zip away a mismatch.
+        if len(decoded) != len(texts):
+            raise TranslationError(
+                f"model returned {len(decoded)} decoded outputs for "
+                f"{len(texts)} inputs"
+            )
+
         results: List[TranslationResult] = []
-        for text, translated in zip(texts, decoded):
+        for index, text in enumerate(texts):
+            translated = decoded[index]
+            if not isinstance(translated, str):
+                raise TranslationError(
+                    f"model returned non-string decoded output at item "
+                    f"{index}: {type(translated).__name__}"
+                )
             translated = translated.strip()
             results.append(
                 TranslationResult(

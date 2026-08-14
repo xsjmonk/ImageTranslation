@@ -10,6 +10,11 @@
     separately when needed). Server output is streamed to log files under
     $env:TEMP.
 
+    The server binds to the host configured in translation-server.config.json
+    (default 0.0.0.0 = all interfaces, so remote machines on the LAN can
+    reach it). When bound to all interfaces the script lists the machine's
+    remote URLs and prints a Windows Firewall hint for inbound access.
+
 .PARAMETER Config
     Path to a translation-server.config.json. Defaults to the repository's
     translation-server.config.json. Relative paths resolve from the current
@@ -82,10 +87,32 @@ catch {
 
 $ServerUrl = "http://${ServerHost}:${ServerPort}"
 
+# When bound to all interfaces (0.0.0.0 / ::), list the machine's LAN
+# addresses so remote clients know which URL to use.
+$LanUrls = @()
+if ($ServerHost -in @('0.0.0.0', '::')) {
+    $LanUrls = @(
+        Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -notlike '127.*' -and
+                $_.IPAddress -notlike '169.254.*' -and
+                $_.PrefixOrigin -ne 'WellKnown'
+            } |
+            ForEach-Object { "http://$($_.IPAddress):$ServerPort" }
+    ) | Sort-Object -Unique
+}
+
 Write-Host ""
 Write-Host "[STATUS] Host:        $ServerHost"
 Write-Host "[STATUS] Port:        $ServerPort"
-Write-Host "[STATUS] URL:         $ServerUrl"
+Write-Host "[STATUS] Local URL:   $ServerUrl"
+if ($LanUrls.Count -gt 0) {
+    foreach ($u in $LanUrls) {
+        Write-Host "[STATUS] Remote URL:  $u"
+    }
+    Write-Host "[INFO]  Remote access: allow inbound TCP port $ServerPort in Windows Firewall"
+    Write-Host "       (run as Administrator: New-NetFirewallRule -DisplayName 'TranslationServer' -Direction Inbound -Protocol TCP -LocalPort $ServerPort -Action Allow)"
+}
 Write-Host "[STATUS] Workers:     $ServerWorkers"
 Write-Host "[STATUS] Log level:   $ServerLogLevel"
 Write-Host "[STATUS] Model:       $ModelName"
@@ -161,7 +188,12 @@ $ErrLog = Join-Path $env:TEMP 'translation-server.err.log'
 $env:PYTHONPATH = Join-Path $RepoRoot 'src'
 
 Write-Host ""
-Write-Host "[INFO] Launching translation server on $ServerUrl ..." -ForegroundColor Green
+if ($LanUrls.Count -gt 0) {
+    Write-Host "[INFO] Launching translation server on all interfaces (local: $ServerUrl) ..." -ForegroundColor Green
+}
+else {
+    Write-Host "[INFO] Launching translation server on $ServerUrl ..." -ForegroundColor Green
+}
 Write-Host "[INFO] First launch may download the model (~1.7 GB). Subsequent starts are fast."
 Write-Host "[INFO] Press Ctrl+C to stop the server."
 Write-Host ""
