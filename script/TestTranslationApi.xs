@@ -100,7 +100,8 @@ func text() {
 func Translate(sentence) {
 	string api = "http://127.0.0.1:8091/translate";
 
-	string body = "{\"text\":" & clr.Ex.Json.Serialize(sentence) & "}";
+	string body = "{\"text\":" & clr.Ex.Json.Serialize(sentence) & ",\"format\":\"html\"}";
+
 	var headers = [
 		new { Name = "Content-Type", Value = "application/json" }
 	];
