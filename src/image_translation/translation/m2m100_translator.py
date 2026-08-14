@@ -36,6 +36,9 @@ class M2M100Translator(Translator):
         self._tokenizer: Optional[object] = None
         self._device_str: str = ""
         self._precision_str: str = ""
+        self._snapshot_path: str = ""
+        self._cache_status: str = ""
+        self._cache_dir: str = ""
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -60,11 +63,16 @@ class M2M100Translator(Translator):
 
         return TranslationRuntimeInfo(
             model_name=self._config.model_name,
+            model_revision=self._config.model_revision,
             device=self._device_str,
             precision=self._precision_str,
             cuda_available=cuda_ok,
             gpu_name=gpu_name,
             ready=self._model is not None,
+            cache_dir=self._cache_dir,
+            snapshot_path=self._snapshot_path,
+            cache_status=self._cache_status,
+            local_files_only=self._config.local_files_only,
         )
 
     def translate_text(
@@ -170,6 +178,126 @@ class M2M100Translator(Translator):
             )
         return f"cuda:{index}"
 
+    def _resolve_model_snapshot(self) -> tuple:
+        """Authoritative model resolution used by tokenizer AND model loading.
+
+        Returns (snapshot_path, cache_status) with cache_status one of
+        "cache_hit" | "download".
+
+        - Resolves the configured cache root to an absolute path (the
+          configured location is authoritative; the implementation never
+          silently falls back to the HF default cache when set).
+        - First tries Hugging Face local-only snapshot resolution; success
+          = cache hit (reused, no network).
+        - On a miss: if downloads are allowed, downloads into the
+          configured root; if offline (local_files_only or downloads
+          disabled), fails with an actionable cache-missing error and no
+          network access.
+        - Verifies the resolved snapshot contains the files M2M100 requires
+          before it can be reported ready.
+
+        Raises:
+            TranslationModelLoadError: offline cache miss, download
+                failure, unusable cache path, or incomplete snapshot.
+        """
+        import os
+        from pathlib import Path
+
+        from huggingface_hub import snapshot_download
+
+        cfg = self._config
+        offline = cfg.local_files_only or not cfg.allow_model_download
+
+        cache_root: Optional[str] = None
+        if cfg.model_cache_dir:
+            cache_root = os.path.expandvars(cfg.model_cache_dir)
+            root = Path(cache_root).expanduser().resolve()
+            cache_root = str(root)
+            if offline and not root.is_dir():
+                raise TranslationModelLoadError(
+                    f"offline mode: configured model cache does not exist: "
+                    f"{cache_root}; pre-download the model (see README) or "
+                    f"fix model_cache_dir"
+                )
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise TranslationModelLoadError(
+                    f"cannot create configured model cache {cache_root}: {exc}"
+                ) from exc
+
+        logger.info(
+            "[INFO] Model cache: %s (model=%s revision=%s offline=%s)",
+            cache_root or "HF default", cfg.model_name,
+            cfg.model_revision, offline,
+        )
+
+        def _snapshot(local_only: bool) -> str:
+            kwargs = {}
+            if cache_root:
+                kwargs["cache_dir"] = cache_root
+            return snapshot_download(
+                repo_id=cfg.model_name,
+                revision=cfg.model_revision,
+                local_files_only=local_only,
+                **kwargs,
+            )
+
+        # 1) Cache-hit probe: local resolution only, never a network call.
+        try:
+            snapshot_path = _snapshot(local_only=True)
+            cache_status = "cache_hit"
+            logger.info("[INFO] Model cache HIT (reused): %s", snapshot_path)
+        except Exception as exc:
+            if offline:
+                raise TranslationModelLoadError(
+                    f"offline model cache miss: {cfg.model_name} revision "
+                    f"{cfg.model_revision} not found in cache "
+                    f"{cache_root or 'HF default'}; pre-download the model "
+                    f"or set allow_model_download=true"
+                ) from exc
+            logger.info(
+                "[INFO] Model cache MISS; downloading %s revision %s "
+                "into %s ...",
+                cfg.model_name, cfg.model_revision,
+                cache_root or "HF default",
+            )
+            try:
+                snapshot_path = _snapshot(local_only=False)
+            except Exception as exc2:
+                raise TranslationModelLoadError(
+                    f"model download failed for {cfg.model_name} revision "
+                    f"{cfg.model_revision} into {cache_root or 'HF default'}: "
+                    f"{exc2}"
+                ) from exc2
+            cache_status = "download"
+            logger.info("[INFO] Model download COMPLETE: %s", snapshot_path)
+
+        self._verify_snapshot(snapshot_path)
+        return snapshot_path, cache_status
+
+    @staticmethod
+    def _verify_snapshot(snapshot_path: str) -> None:
+        """Fail before ready if the resolved snapshot misses required files."""
+        from pathlib import Path
+
+        root = Path(snapshot_path)
+        required = [
+            ("config.json", ["config.json"]),
+            ("model weights", ["model.safetensors", "pytorch_model.bin"]),
+            ("tokenizer files", ["tokenizer.json", "sentencepiece.bpe.model"]),
+        ]
+        missing = [
+            label for label, candidates in required
+            if not any((root / c).is_file() for c in candidates)
+        ]
+        if missing:
+            raise TranslationModelLoadError(
+                f"incomplete model snapshot at {snapshot_path}: missing "
+                f"{', '.join(missing)}; re-download the model or repair "
+                f"the cache"
+            )
+
     def _load_model(self) -> None:
         import torch
         from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
@@ -190,51 +318,32 @@ class M2M100Translator(Translator):
                 "use 'auto' or 'float32'."
             )
 
-        # --- Load tokenizer + model ---
+        # --- Authoritative model resolution (cache policy) ---
         logger.info("[INFO] Loading translation model: %s", self._config.model_name)
-        cache_kwargs = {}
-        if self._config.model_cache_dir:
-            cache_kwargs["cache_dir"] = self._config.model_cache_dir
-
-        # --- Diagnostics: resolve the actual cached checkpoint path ---
-        try:
-            from huggingface_hub import snapshot_download
-            resolved_path = snapshot_download(
-                self._config.model_name,
-                local_files_only=True,
-                **(cache_kwargs if self._config.model_cache_dir else {}),
-            )
-            logger.debug(
-                "DIAG model_name=%s checkpoint_path=%s cache_dir=%s",
-                self._config.model_name,
-                resolved_path,
-                self._config.model_cache_dir or "HF default",
-            )
-        except Exception as e:
-            logger.debug(
-                "DIAG could not resolve cached checkpoint for %s: %s",
-                self._config.model_name,
-                e,
-            )
+        snapshot_path, cache_status = self._resolve_model_snapshot()
+        offline = self._config.local_files_only or not self._config.allow_model_download
+        # Both the tokenizer and the model load from the SAME resolved
+        # snapshot for the SAME revision; no ambiguous remote identifier.
+        load_kwargs = {"local_files_only": offline}
 
         try:
             tokenizer = M2M100Tokenizer.from_pretrained(
-                self._config.model_name, **cache_kwargs
+                snapshot_path, **load_kwargs
             )
         except Exception as e:
             raise TranslationModelLoadError(
-                f"Failed to load tokenizer for {self._config.model_name}: {e}"
+                f"Failed to load tokenizer from {snapshot_path}: {e}"
             ) from e
 
         tokenizer.src_lang = self._config.source_language
 
         try:
             model = M2M100ForConditionalGeneration.from_pretrained(
-                self._config.model_name, **cache_kwargs
+                snapshot_path, **load_kwargs
             )
         except Exception as e:
             raise TranslationModelLoadError(
-                f"Failed to load model {self._config.model_name}: {e}"
+                f"Failed to load model from {snapshot_path}: {e}"
             ) from e
 
         # --- Precision ---
@@ -253,8 +362,12 @@ class M2M100Translator(Translator):
         self._model = model
         self._tokenizer = tokenizer
         self._device_str = device_str
+        self._snapshot_path = snapshot_path
+        self._cache_status = cache_status
+        self._cache_dir = self._config.model_cache_dir or ""
 
-        logger.info("[INFO] Model ready.")
+        logger.info("[INFO] Model ready (snapshot=%s, %s).",
+                    snapshot_path, cache_status)
 
     def _resolve_precision(self, model, device_str: str) -> str:
         """Apply precision strategy and return the effective precision name.

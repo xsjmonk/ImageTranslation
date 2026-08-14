@@ -85,8 +85,14 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
         return HealthResponse(
             status="ok" if info.ready else "starting",
             model=info.model_name,
+            model_revision=info.model_revision,
             device=info.device,
+            precision=info.precision,
             ready=info.ready,
+            cache_dir=info.cache_dir,
+            snapshot_path=info.snapshot_path,
+            cache_status=info.cache_status,
+            local_files_only=info.local_files_only,
         )
 
     @app.post("/translate", response_model=TranslateResponse)

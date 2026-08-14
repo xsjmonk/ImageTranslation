@@ -124,3 +124,79 @@ class TestServerConfigValidation:
         p = _write_config(tmp_path, {"translation": {"max_input_characters": 0}})
         with pytest.raises(ValueError, match="max_input_characters"):
             load_server_config(p)
+
+
+class TestModelCacheConfig:
+    def test_absolute_cache_dir_preserved_and_normalized(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {"translation": {"model_cache_dir": "D:/Models/ImageTranslation/hf"}},
+        )
+        cfg = load_server_config(cfg_path)
+        assert Path(cfg.translation.model_cache_dir) == \
+            Path("D:/Models/ImageTranslation/hf").resolve()
+
+    def test_relative_cache_dir_resolves_against_config_dir(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {"translation": {"model_cache_dir": "models/hf-cache"}},
+        )
+        cfg = load_server_config(cfg_path)
+        assert Path(cfg.translation.model_cache_dir) == \
+            (tmp_path / "models" / "hf-cache").resolve()
+
+    def test_env_var_expansion_in_cache_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("IT_TEST_CACHE", "expanded-cache")
+        cfg_path = _write_config(
+            tmp_path,
+            {"translation": {"model_cache_dir": "${IT_TEST_CACHE}/hf"}},
+        )
+        cfg = load_server_config(cfg_path)
+        assert Path(cfg.translation.model_cache_dir) == \
+            (tmp_path / "expanded-cache" / "hf").resolve()
+
+    def test_omitted_cache_dir_defaults_to_none(self, tmp_path):
+        cfg_path = _write_config(tmp_path, {"translation": {}})
+        cfg = load_server_config(cfg_path)
+        assert cfg.translation.model_cache_dir is None
+        assert cfg.translation.model_revision == "main"
+        assert cfg.translation.allow_model_download is True
+        assert cfg.translation.local_files_only is False
+
+    def test_new_fields_parsed(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {
+                "translation": {
+                    "model_revision": "v1.1",
+                    "allow_model_download": False,
+                    "local_files_only": True,
+                }
+            },
+        )
+        cfg = load_server_config(cfg_path)
+        assert cfg.translation.model_revision == "v1.1"
+        assert cfg.translation.allow_model_download is False
+        assert cfg.translation.local_files_only is True
+
+    def test_contradictory_download_offline_rejected(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {
+                "translation": {
+                    "allow_model_download": True,
+                    "local_files_only": True,
+                }
+            },
+        )
+        with pytest.raises(ValueError, match="contradicts"):
+            load_server_config(cfg_path)
+
+    def test_cache_dir_pointing_at_file_rejected(self, tmp_path):
+        target = tmp_path / "not-a-dir"
+        target.write_text("x", encoding="utf-8")
+        cfg_path = _write_config(
+            tmp_path, {"translation": {"model_cache_dir": str(target)}}
+        )
+        with pytest.raises(ValueError, match="not a directory"):
+            load_server_config(cfg_path)

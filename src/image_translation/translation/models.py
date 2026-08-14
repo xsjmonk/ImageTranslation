@@ -35,8 +35,14 @@ class TranslationResult:
 class TranslationRuntimeInfo:
     """Metadata about the loaded translation engine."""
     model_name: str = ""
+    model_revision: str = ""
     device: str = ""
     precision: str = ""
     cuda_available: bool = False
     gpu_name: str = ""
     ready: bool = False
+    # Model cache diagnostics (no secrets)
+    cache_dir: str = ""          # configured HF cache root ("" = HF default)
+    snapshot_path: str = ""      # resolved snapshot directory actually loaded
+    cache_status: str = ""       # "cache_hit" | "download" | "none"
+    local_files_only: bool = False

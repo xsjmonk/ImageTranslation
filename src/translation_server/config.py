@@ -12,6 +12,7 @@ Validation happens at load time:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -63,6 +64,15 @@ def _validate(config: TranslationServerConfig) -> None:
             f"got '{server.log_level}'"
         )
 
+    translation = config.translation
+    if translation.model_cache_dir:
+        cache_path = Path(translation.model_cache_dir)
+        if cache_path.exists() and not cache_path.is_dir():
+            raise ValueError(
+                f"translation.model_cache_dir exists but is not a directory: "
+                f"{translation.model_cache_dir}"
+            )
+
     trans = config.translation
     if trans.cuda_device < 0:
         raise ValueError(f"translation.cuda_device must be >= 0, got {trans.cuda_device}")
@@ -106,6 +116,29 @@ def _resolve_config_path(explicit_path: Optional[Path]) -> Optional[Path]:
     if default_path.exists():
         return default_path
     return None
+
+
+def _resolve_cache_dir(raw: object, config_file: Optional[Path]) -> Optional[str]:
+    """Resolve the configured model cache root.
+
+    - None/empty -> None (HF default cache; backward compatible).
+    - Environment variables are expanded (os.path.expandvars — safe, no
+      shell evaluation).
+    - Relative paths resolve against the directory containing the selected
+      config file (never the unpredictable current working directory).
+    - The result is normalized to an absolute path.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    expanded = os.path.expandvars(value)
+    path = Path(expanded).expanduser()
+    if not path.is_absolute():
+        base = config_file.parent if config_file is not None else Path.cwd()
+        path = base / path
+    return str(path.resolve())
 
 
 def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
@@ -189,6 +222,7 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
 
     translation = TranslationConfig(
         model_name=trans_raw.get("model_name", "facebook/m2m100_418M"),
+        model_revision=trans_raw.get("model_revision", "main"),
         source_language=trans_raw.get("source_language", "zh"),
         target_language=trans_raw.get("target_language", "en"),
         device=trans_raw.get("device", "cuda"),
@@ -198,7 +232,9 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         batch_size=trans_raw.get("batch_size", 8),
         max_input_characters=trans_raw.get("max_input_characters", 4000),
         generation=generation,
-        model_cache_dir=trans_raw.get("model_cache_dir"),
+        model_cache_dir=_resolve_cache_dir(trans_raw.get("model_cache_dir"), resolved),
+        allow_model_download=trans_raw.get("allow_model_download", True),
+        local_files_only=trans_raw.get("local_files_only", False),
     )
 
     config = TranslationServerConfig(

@@ -37,11 +37,17 @@ class TranslateResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """GET /health response."""
+    """GET /health response (backward compatible; extra fields allowed)."""
     status: str = "ok"          # ok | starting
     model: str = ""
+    model_revision: str = ""
     device: str = ""
+    precision: str = ""
     ready: bool = False
+    cache_dir: str = ""
+    snapshot_path: str = ""
+    cache_status: str = ""      # cache_hit | download | none
+    local_files_only: bool = False
 
 
 class ErrorResponse(BaseModel):

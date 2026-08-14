@@ -27,6 +27,10 @@
   },
   "translation": {
     "model_name": "facebook/m2m100_418M",
+    "model_revision": "main",
+    "model_cache_dir": "D:/Models/ImageTranslation/huggingface",
+    "allow_model_download": true,
+    "local_files_only": false,
     "source_language": "zh",
     "target_language": "en",
     "device": "cuda",

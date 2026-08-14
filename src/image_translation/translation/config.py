@@ -21,8 +21,23 @@ class TranslationConfig:
     """Reusable translation configuration.
 
     Used by both ImageTranslation pipeline and the standalone translation server.
+
+    Model cache semantics:
+    - model_cache_dir (optional): Hugging Face cache ROOT for the model
+      (HF creates its normal models--<org>--<name> structure below it).
+      Omitted/empty = the HF default cache (backward compatible). When set,
+      it is the AUTHORITATIVE location — the implementation never silently
+      falls back to the default cache.
+    - model_revision: revision resolved consistently for snapshot, tokenizer,
+      and model loading (default "main").
+    - allow_model_download: permits downloading only when the requested
+      revision is not already available in the configured cache.
+    - local_files_only: forbids ALL network access; a cache miss is a clear
+      error. Contradictory with allow_model_download=true (rejected at
+      validation time).
     """
     model_name: str = "facebook/m2m100_418M"
+    model_revision: str = "main"
     source_language: str = "zh"
     target_language: str = "en"
     device: str = "cuda"
@@ -33,6 +48,8 @@ class TranslationConfig:
     max_input_characters: int = 4000
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     model_cache_dir: Optional[str] = None
+    allow_model_download: bool = True
+    local_files_only: bool = False
 
     def __post_init__(self) -> None:
         if self.precision not in ("auto", "float16", "float32"):
@@ -47,6 +64,15 @@ class TranslationConfig:
             raise ValueError("max_input_characters must be >= 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be >= 1")
+        if not self.model_name or not isinstance(self.model_name, str):
+            raise ValueError("model_name must be a non-empty string")
+        if not self.model_revision or not isinstance(self.model_revision, str):
+            raise ValueError("model_revision must be a non-empty string")
+        if self.local_files_only and self.allow_model_download:
+            raise ValueError(
+                "local_files_only=true contradicts allow_model_download=true; "
+                "set allow_model_download=false for a fully offline cache"
+            )
 
     def effective_device(self) -> str:
         """Return the device string to use, e.g. 'cuda:0'."""

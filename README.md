@@ -147,6 +147,34 @@ The first launch downloads the model (~1.7 GB). Subsequent starts are fast.
 - `warmup_on_start: true` (default) — model loads before the API becomes ready; startup fails if the model cannot load.
 - `warmup_on_start: false` — model loads lazily on the first `/translate` request; `/health` reports `"status": "starting", "ready": false` until then.
 
+### Model cache location and offline mode
+
+The model download location is configurable under `translation`:
+
+```json
+"translation": {
+  "model_name": "facebook/m2m100_418M",
+  "model_revision": "main",
+  "model_cache_dir": "D:/Models/ImageTranslation/huggingface",
+  "allow_model_download": true,
+  "local_files_only": false
+}
+```
+
+- **Default behavior**: `model_cache_dir` omitted/empty → the Hugging Face default cache is used (backward compatible). `model_cache_dir` is a Hugging Face **cache root** (HF creates its normal `models--<org>--<name>` structure below it), not an arbitrary renamed snapshot directory.
+- **Path resolution**: environment variables are expanded (`%VAR%` / `${VAR}`); relative paths resolve against the directory containing the config file (never the current working directory); the final absolute path is logged at startup.
+- **Shared cache**: point several machines at one writable cache root (e.g. `D:/Models/ImageTranslation/huggingface`). When the configured cache is set it is the **authoritative** location — the implementation never silently falls back to the default cache.
+- **Pre-download** (one-time, on any machine with network):
+
+  ```powershell
+  conda run -n dp python -c "from huggingface_hub import snapshot_download; print(snapshot_download('facebook/m2m100_418M', revision='main', cache_dir='D:/Models/ImageTranslation/huggingface'))"
+  ```
+
+  or simply start the server once with `allow_model_download: true` — the first warmup downloads and logs `Model download COMPLETE`.
+- **Fully offline** after pre-download: set `"allow_model_download": false, "local_files_only": true`. Startup then resolves and loads only from the configured cache; a missing/incomplete model fails with an actionable error and never touches the network, never falls back to another cache, and never silently switches to CPU. Contradictory `local_files_only: true` + `allow_model_download: true` is rejected at config validation.
+- **Verify the resolved path**: startup logs `Model cache HIT (reused): <snapshot>` or `Model download COMPLETE: <snapshot>`, and `GET /health` returns `cache_dir`, `snapshot_path`, `cache_status` (`cache_hit`/`download`), `model_revision`, `local_files_only`, plus the existing `device`/`ready` fields.
+- **Permissions and disk**: the model is ~2.5 GB; the cache root must be writable (the configured directory is created if its parent is valid). Incomplete snapshots are detected before the server reports ready.
+
 ### Long-running requests
 
 Translation may take several seconds. The HTTP request stays open until inference completes — there is **no server-side timeout**. GPU inference runs in the threadpool and never blocks the event loop, so `/health` stays responsive. Callers must use a sufficiently long HTTP client timeout (PowerShell's `Invoke-RestMethod` waits by default).
