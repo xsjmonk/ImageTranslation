@@ -19,6 +19,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Path to translation-server.config.json",
     )
+    parser.add_argument(
+        "--check-cache",
+        action="store_true",
+        help="Validate the configured model cache (resolution + snapshot "
+             "completeness + offline policy) without loading the model, "
+             "print the resolved snapshot, and exit 0/1.",
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config) if args.config else None
@@ -30,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"[ERROR] Config error: {e}", file=sys.stderr)
         return 1
+
+    if args.check_cache:
+        return _check_cache(server_config)
 
     # Setup logging
     log_level = getattr(logging, server_config.server.log_level.upper(), logging.INFO)
@@ -57,6 +67,28 @@ def main(argv: list[str] | None = None) -> int:
         log_level=sc.log_level,
         access_log=(sc.log_level == "debug"),
     )
+    return 0
+
+
+def _check_cache(server_config) -> int:
+    """Run the --check-cache preflight and exit.
+
+    Reuses the shared translator's authoritative cache resolution; no
+    tokenizer/model is loaded and no GPU is required.
+    """
+    from image_translation.translation import create_translator
+    from image_translation.translation.exceptions import TranslationModelLoadError
+
+    translator = create_translator(server_config.translation)
+    try:
+        resolved = translator.check_cache()
+    except TranslationModelLoadError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 1
+    print(f"[OK] model: {resolved.model_name} revision: {resolved.revision}")
+    print(f"[OK] cache: {resolved.cache_dir or 'HF default'}")
+    print(f"[OK] snapshot: {resolved.snapshot_path}")
+    print(f"[OK] status: {resolved.cache_status} | offline: {resolved.offline}")
     return 0
 
 

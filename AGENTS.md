@@ -48,3 +48,28 @@ conda run -n dp python -c "from image_translation.translation import Translation
 The shared translation module lives in `src/image_translation/translation/`.  
 The FastAPI host lives in `src/translation_server/`.  
 **Never** let the shared module import FastAPI. FastAPI depends on the shared module, not vice versa.
+
+## Architecture skill (all agents)
+
+The reuse-first architecture skill is **mandatory workflow, not optional
+advice**, for every coding agent before any architecture-sensitive work:
+
+- feature additions;
+- bug fixes;
+- refactors;
+- library/dependency selection;
+- changes to services, parsers, model loaders, clients, configuration, or
+  infrastructure.
+
+Read and follow the canonical skill:
+
+> Read `.agent-skills/reuse-first-architecture/SKILL.md` and follow it for
+> this task.
+
+The skill enforces: search before building (reuse/adapt/extend/replace
+with named-component evidence), SOLID and dependency inversion,
+preservation of public contracts and HTML/cache/GPU invariants, and
+evidence-based implementation plus verification in one round. Its
+references (`references/`) contain the repository-specific architecture
+contracts and the verification checklist. Do not duplicate the skill text
+in this file; point to the canonical path.

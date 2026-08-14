@@ -1,0 +1,31 @@
+---
+description: Read and follow the canonical reuse-first architecture skill for repository changes.
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Reuse-first architecture
+
+Before adding a feature, fixing a bug, refactoring, or changing services,
+parsers, model loaders, clients, configuration, or infrastructure, read the
+canonical skill and follow it:
+
+> Read `.agent-skills/reuse-first-architecture/SKILL.md` and its references
+> before implementation.
+
+Key obligations:
+
+- Search before building: reuse, adapt, or extend existing components
+  (models, parsers, config, cache, HTTP, retry/timeout logic) before
+  writing new code; name the component and its contract when reusing.
+- Apply SOLID and dependency inversion: transport stays thin,
+  `src/image_translation` never imports FastAPI/server code, model and
+  tokenizer resolution stays centralized.
+- Preserve public contracts, HTML/entity protection invariants, cache/
+  offline/GPU/precision/language-pair policies, and `environment.yml` as
+  the dependency source of truth.
+- Implement one coherent slice, verify with the relevant tests, and
+  report evidence. Do not claim a suite passed without running it.
+
+This rule does not override `AGENTS.md` or more specific repository
+instructions.

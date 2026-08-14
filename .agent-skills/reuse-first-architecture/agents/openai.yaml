@@ -1,0 +1,7 @@
+interface:
+  display_name: "Reuse-First Architecture"
+  short_description: "Reuse-first SOLID design for code changes"
+  default_prompt: "Use $reuse-first-architecture to inspect existing capabilities, apply SOLID boundaries, implement the smallest safe change, and verify it with tests."
+
+policy:
+  allow_implicit_invocation: true

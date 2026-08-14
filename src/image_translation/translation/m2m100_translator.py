@@ -131,6 +131,23 @@ class M2M100Translator(Translator):
         """Explicitly trigger model loading. Idempotent."""
         self._ensure_loaded()
 
+    def check_cache(self) -> ResolvedModel:
+        """Validate the configured model cache WITHOUT loading the model.
+
+        Reuses the authoritative snapshot resolution and completeness
+        check. Side-effect free apart from the documented cache-directory
+        creation; nothing is retained and no GPU/tokenizer/model is loaded.
+
+        Returns:
+            The ResolvedModel (snapshot path, revision, cache status,
+            offline flag).
+
+        Raises:
+            TranslationModelLoadError: offline cache miss, download
+                failure, or incomplete snapshot.
+        """
+        return self._resolve_model_snapshot()
+
     def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
         """Measure source tokens WITHOUT truncation using the EXACT
         tokenizer loaded for inference.

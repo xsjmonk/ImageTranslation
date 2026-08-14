@@ -35,7 +35,13 @@ from image_translation.translation.exceptions import (
 )
 from image_translation.translation.structured_translation import StructuredTranslator
 
-from .api_models import ErrorResponse, HealthResponse, TranslateRequest, TranslateResponse
+from .api_models import (
+    CacheResponse,
+    ErrorResponse,
+    HealthResponse,
+    TranslateRequest,
+    TranslateResponse,
+)
 from .runtime import TranslationRuntime
 
 logger = logging.getLogger(__name__)
@@ -94,6 +100,56 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
             cache_status=info.cache_status,
             local_files_only=info.local_files_only,
             offline=info.offline,
+        )
+
+    @app.get("/cache", response_model=CacheResponse)
+    async def cache() -> CacheResponse:
+        """Model-cache state.
+
+        Thin HTTP facade: reuses the translator's runtime_info and, when
+        the model is not loaded yet, the optional check_cache() capability
+        (a live, model-free resolution). No domain logic lives here.
+        """
+        translator = runtime.translator
+        info = translator.runtime_info
+        if not info.ready:
+            check = getattr(translator, "check_cache", None)
+            if check is not None:
+                from image_translation.translation.exceptions import (
+                    TranslationModelLoadError,
+                )
+                try:
+                    resolved = check()
+                except TranslationModelLoadError:
+                    logger.warning("GET /cache: cache resolution failed "
+                                   "(model not loaded)")
+                    return CacheResponse(
+                        model=info.model_name,
+                        revision=info.model_revision,
+                        cache_status="error",
+                        local_files_only=info.local_files_only,
+                        offline=info.offline,
+                        ready=False,
+                    )
+                return CacheResponse(
+                    model=resolved.model_name,
+                    revision=resolved.revision,
+                    cache_dir=resolved.cache_dir,
+                    snapshot_path=resolved.snapshot_path,
+                    cache_status=resolved.cache_status,
+                    local_files_only=info.local_files_only,
+                    offline=resolved.offline,
+                    ready=False,
+                )
+        return CacheResponse(
+            model=info.model_name,
+            revision=info.model_revision,
+            cache_dir=info.cache_dir,
+            snapshot_path=info.snapshot_path,
+            cache_status=info.cache_status,
+            local_files_only=info.local_files_only,
+            offline=info.offline,
+            ready=info.ready,
         )
 
     @app.post("/translate", response_model=TranslateResponse)

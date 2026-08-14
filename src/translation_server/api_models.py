@@ -52,6 +52,19 @@ class HealthResponse(BaseModel):
                                  # downloads disabled)
 
 
+class CacheResponse(BaseModel):
+    """GET /cache response — model-cache state (thin HTTP facade over the
+    shared translator's cache capabilities; no domain logic)."""
+    model: str = ""
+    revision: str = ""
+    cache_dir: str = ""
+    snapshot_path: str = ""
+    cache_status: str = ""       # cache_hit | download | error | none
+    local_files_only: bool = False
+    offline: bool = False
+    ready: bool = False
+
+
 class ErrorResponse(BaseModel):
     """Standard safe JSON error envelope (no internals/tracebacks)."""
     error: str
