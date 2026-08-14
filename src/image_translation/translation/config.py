@@ -130,6 +130,8 @@ class StructuredConfig:
       in-flight segment is not interruptible; once it returns, work stops
       and the request fails with a clear error).
     - max_retries_per_segment: stricter-placeholder retry count.
+    - batch_size: segments grouped into one model batch call (first pass),
+      preserving source order; failed batch items are retried individually.
     - concurrency: bounds concurrent translations (GPU holds one model).
     """
     enabled: bool = True
@@ -145,6 +147,7 @@ class StructuredConfig:
     segment_warning_seconds: float = 60.0
     max_total_seconds: float = 600.0
     max_retries_per_segment: int = 1
+    batch_size: int = 4
     concurrency: int = 1
 
     def __post_init__(self) -> None:
@@ -166,6 +169,8 @@ class StructuredConfig:
             raise ValueError("max_total_seconds must be > 0")
         if self.max_retries_per_segment < 0:
             raise ValueError("max_retries_per_segment must be >= 0")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
         if self.concurrency < 1:
             raise ValueError("concurrency must be >= 1")
         # --- preserve_patterns validation ---

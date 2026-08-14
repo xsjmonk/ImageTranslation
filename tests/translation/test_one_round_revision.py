@@ -356,11 +356,13 @@ class TestLanguagePropagation:
 
     def test_max_new_tokens_override_passed(self):
         fake = FakeTranslator()
-        # 100 chars -> ~50 source tokens -> budget = min(120, 125) = 120
+        # 100 chars -> ~50 source tokens -> requested budget = min(120, 125)
+        # = 120, which is raised to the documented quantized bucket 128
+        # (never lowered; the requested budget is recorded in metrics).
         StructuredTranslator(
             fake, StructuredConfig(max_target_tokens=120), TranslationConfig()
         ).translate("<p>" + "加厚防水面料" * 20 + "</p>")
-        assert fake.calls[0]["max_new_tokens"] == 120
+        assert fake.calls[0]["max_new_tokens"] == 128  # bucket(120)
 
 
 # ---------------------------------------------------------------------------
@@ -517,9 +519,13 @@ class TestDeadline:
                 return super().translate_batch_texts(texts, source_lang, target_lang, max_new_tokens)
 
         fake = SlowFake()
-        cfg = StructuredConfig(max_total_seconds=0.15)
-        # multiple segments so the deadline check runs between them
-        html = "".join(f"<p>第{i}段中文内容</p>" for i in range(3))
+        cfg = StructuredConfig(max_total_seconds=0.15, max_segment_tokens=60, batch_size=4)
+        # Enough content for several bounded batches so the between-batch
+        # deadline check fires after the first slow batch call returns.
+        html = "".join(
+            f"<p>第{i}段中文内容。" + "中文内容。" * 30 + "</p>"
+            for i in range(20)
+        )
         with pytest.raises(StructuredTranslationError, match="deadline"):
             StructuredTranslator(fake, cfg, TranslationConfig()).translate(html)
 

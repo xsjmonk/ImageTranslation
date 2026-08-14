@@ -214,11 +214,13 @@ Structured configuration (`structured` section in `translation-server.config.jso
   "segment_warning_seconds": 60.0,
   "max_total_seconds": 600.0,
   "max_retries_per_segment": 1,
+  "batch_size": 4,
   "concurrency": 1
 }
 ```
 
 Notes:
+- `batch_size` — segments are grouped into bounded first-pass batches (source order preserved) and each batch is sent to the shared translator's `translate_batch_texts()` **once**. Groups are formed by (language pair, **quantized target-budget bucket** — `64, 128, 192, 256, 320, 400`), so short segments never run with an unnecessarily large `max_new_tokens`; the batch budget is the bucket, which is **never below** any member's required budget (never lowered, never truncated). Every result is validated independently with the strict complete placeholder sequence, and only failed items are retried individually (stricter prefix → split fallback → fail closed). Batch **cardinality is checked explicitly** after every call — zero/fewer/extra/None/malformed results are never silently zipped away; affected segments are recovered individually or the request fails closed. No concurrent model calls (`concurrency=1` default). Metrics distinguish `sum_requested_target_tokens` (per-segment required budgets) from `batch_generation_budget` (bucket × items actually passed to the model) and record per-batch `batch_metrics` (items, max budget, per-segment budgets/buckets, source tokens, elapsed).
 - `context_window_tokens: 0` — context injection is **not implemented** (M2M100's `generate()` has no reliable context API) and this value is reserved; it MUST stay 0. Segment adjacency is recorded for diagnostics only, not as context. Terminology consistency across segments is guaranteed for protected terms (identifiers/English restore identical text); for translatable Chinese terms it depends on model determinism (fixed beams → deterministic output for identical input).
 - **Inline-code extraction (exact lexical preservation)**: before parsing, a lexical scanner replaces every character reference (`&nbsp;`, `&#160;`, `&#xA0;`, `&amp;`, `&lt;br&gt;`, ...) and every bare `&` with a collision-resistant sentinel; tags are also recorded in their exact source spelling. Entities/tags therefore NEVER reach the model as free text — they are restored from the source map by stable IDs after translation. Guarantees:
   - `&nbsp;`, `&#160;`, and `&#xA0;` keep their distinct, exact spellings (never decoded/normalized);

@@ -178,11 +178,26 @@ def rebuild_document(
         else:
             elem_id, attr_name = None, None
 
-        pieces, _ = seg.protected_map.restore_split(seg.translated_text)
-        if len(pieces) != 1:
+        pieces, protected_sequence = seg.protected_map.restore_split(seg.translated_text)
+        seq = [s.token for s in protected_sequence]
+        if seq == seg.placeholder_order:
+            # Normal path: protected identifiers restored from the source
+            # map at their exact positions (never from model output).
+            value = ""
+            for i, piece in enumerate(pieces):
+                value += piece
+                if i < len(protected_sequence):
+                    value += protected_sequence[i].content
+        elif not seq and len(pieces) == 1:
+            # Split-fallback path: the per-run outputs were already
+            # validated and their protected identifiers restored from the
+            # source map; the rebuilt value contains no placeholder tokens.
+            value = pieces[0]
+        else:
             raise StructuredTranslationError(
-                f"attribute segment {seg.segment_id}: expected 1 piece, "
-                f"got {len(pieces)}"
+                f"attribute segment {seg.segment_id}: protected sequence "
+                f"{seq} does not match {seg.placeholder_order} and is not "
+                f"a validated fallback output; refusing to reconstruct"
             )
         if elem_id is not None:
             elem = doc.get_element_node(elem_id)

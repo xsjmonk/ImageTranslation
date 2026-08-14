@@ -98,8 +98,11 @@ class ProtectionMap:
             if tok not in self._spans:
                 issues.append(f"unknown placeholder invented: {tok}")
 
-        # 2) Missing / duplicated / altered known placeholders.
-        for token in expected:
+        # 2) Missing / duplicated / altered known placeholders. Iterate the
+        #    CALL's expected sequence (a block split across segments shares
+        #    one ProtectionMap, so map-wide tokens of sibling segments must
+        #    not be required here).
+        for token in expected_order:
             count = output.count(token)
             if count == 0:
                 issues.append(f"placeholder missing: {token}")

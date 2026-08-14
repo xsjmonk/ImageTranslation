@@ -12,11 +12,18 @@ Pipeline (documented):
    subtrees are never sent);
 5. token-aware segmentation with an explicit run model (truncation=False
    measurement; every English/identifier/tag span has a placeholder);
-6. batch translation through the existing translator (never HTTP), with the
-   REQUEST source/target languages propagated to every model call;
-7. per-segment placeholder validation (every placeholder exactly once, in
-   source order) with retry (fresh placeholder namespace) and per-chinese-run
-   split fallback;
+6. TRUE bounded first-pass batching: segments are grouped (configurable
+   batch_size, source order preserved) and each batch is sent to the shared
+   translator's translate_batch_texts() ONCE (never HTTP), with the REQUEST
+   source/target languages propagated to every model call and the batch
+   target budget taken as the MAX of the per-segment budgets (no budget is
+   silently lowered);
+7. per-segment placeholder validation of every batch item (strict complete
+   sequence: every placeholder exactly once, in source order; unknown/
+   invented placeholder tokens rejected) — only failed items are retried
+   individually (fresh placeholder namespace), then per-chinese-run split
+   fallback; successful items are never re-sent; an unrecoverable segment
+   fails the request closed with no partial output;
 8. ordered reconstruction from run metadata (never string splitting) with
    fail-closed fingerprint/excluded checks.
 
@@ -60,6 +67,24 @@ from .reconstruction import rebuild_document
 logger = logging.getLogger(__name__)
 
 _tokenizer_cache: Dict[tuple, object] = {}
+
+# Documented quantized target-budget buckets. Segments are grouped by
+# (language pair, bucket(required_budget)); the batch's max_new_tokens is
+# the bucket, which is NEVER below any member's required budget (buckets
+# only raise up to the next boundary) and never exceeds max_target_tokens.
+# Bucketing keeps short segments from running with a large max_new_tokens
+# while preventing pathological group fragmentation (every distinct
+# 2.5x-derived budget becoming its own single-item batch).
+TARGET_BUDGET_BUCKETS = (64, 128, 192, 256, 320, 400)
+
+
+def _budget_bucket(budget: int) -> int:
+    """Smallest documented bucket >= budget (never lowers; beyond the
+    buckets the exact budget is used)."""
+    for b in TARGET_BUDGET_BUCKETS:
+        if budget <= b:
+            return b
+    return budget
 
 # CJK ideographs only (for repeated-term reporting)
 _CJK_GRAM_RE = re.compile(r"^[\u4e00-\u9fff]+$")
@@ -165,6 +190,10 @@ class StructuredTranslationResult:
     translated_attributes: int
     source_language: str
     target_language: str
+    batch_count: int = 0
+    batch_generation_budget: int = 0
+    sum_requested_target_tokens: int = 0
+    batch_metrics: List[dict] = field(default_factory=list)
     segments: List[dict] = field(default_factory=list)
     # Machine-readable metrics (JSON-serializable): terminology map,
     # repeated terms, budgets, validation status. See to_dict().
@@ -179,12 +208,16 @@ class StructuredTranslationResult:
             "segment_count": self.segment_count,
             "total_source_tokens": self.total_source_tokens,
             "total_target_tokens": self.total_target_tokens,
+            "sum_requested_target_tokens": self.sum_requested_target_tokens,
+            "batch_generation_budget": self.batch_generation_budget,
             "protected_run_count": self.protected_run_count,
             "terminology": self.metrics.get("terminology", {}),
             "repeated_terms": self.metrics.get("repeated_terms", {}),
             "duration_seconds": round(self.duration_seconds, 3),
             "retry_count": self.retry_count,
             "fallback_count": self.fallback_count,
+            "batch_count": self.batch_count,
+            "batch_metrics": self.batch_metrics,
             "validation": "ok",
             "fingerprint_ok": self.fingerprint_ok,
             "excluded_text_nodes": self.excluded_text_nodes,
@@ -299,41 +332,165 @@ class StructuredTranslator:
             len(html), source_lang, target_lang, protected_run_count,
         )
 
-        # --- translate segments in batches ---
+        # --- translate segments in TRUE bounded batches (first pass) ---
+        # Segments are grouped into batches (configurable batch_size,
+        # source order preserved) and each batch is sent to the shared
+        # translator's translate_batch_texts() ONCE. Groups are formed by
+        # (language pair, quantized target-budget bucket) so short segments
+        # never run with an unnecessarily large max_new_tokens: the group's
+        # generation budget is the documented bucket, never below any
+        # member's required budget (never lowered, never truncated).
+        # Group order is first-seen within the chunk; every segment object
+        # retains its own sequence index and outputs are restored onto the
+        # ORIGINAL segment objects, so no correctness mechanism relies on
+        # dictionary/group iteration order. Every result is validated
+        # independently with the strict complete placeholder sequence;
+        # only failed items are retried individually (stricter prefix),
+        # then split fallback, then fail closed. Batch cardinality is
+        # checked explicitly after every batch call — a mismatch is
+        # recovered per segment or fails closed; results are never
+        # silently zipped away. No concurrent model calls.
         retry_count = 0
         fallback_count = 0
         total_source_tokens = 0
         total_target_tokens = 0
+        batch_generation_budget = 0
+        sum_requested_target_tokens = 0
+        batch_metrics: List[dict] = []
+        batch_count = 0
+        batch_size = cfg.batch_size
 
-        batch_size = 4
         for start_idx in range(0, len(all_segments), batch_size):
+            if time.monotonic() > deadline:
+                raise StructuredTranslationError(
+                    f"deadline exceeded (max_total_seconds="
+                    f"{cfg.max_total_seconds}); request aborted between "
+                    f"batches; no partial output returned"
+                )
             chunk = all_segments[start_idx : start_idx + batch_size]
             for seg in chunk:
-                if time.monotonic() > deadline:
-                    raise StructuredTranslationError(
-                        f"deadline exceeded (max_total_seconds="
-                        f"{cfg.max_total_seconds}); request aborted between "
-                        f"segments; no partial output returned"
-                    )
                 total_source_tokens += seg.token_count
-                target_budget = self._target_budget(seg.token_count)
 
-                ok, translated, retried, fell_back = self._translate_segment(
-                    seg, target_budget, deadline
+            # Per-segment REQUIRED target budgets (never lowered) and the
+            # documented quantized bucket actually passed to generation.
+            budgets = {
+                id(seg): self._target_budget(seg.token_count)
+                for seg in chunk
+            }
+            buckets = {
+                id(seg): _budget_bucket(budgets[id(seg)])
+                for seg in chunk
+            }
+            sum_requested_target_tokens += sum(budgets.values())
+
+            # Group by (language pair, budget bucket) in first-seen order.
+            # Segments keep their sequence_index; outputs are restored onto
+            # the original segment objects afterwards. No correctness
+            # mechanism relies on group iteration order.
+            groups: List[tuple] = []
+            group_key_index: Dict[tuple, int] = {}
+            for seg in chunk:
+                key = (
+                    (seg.source_language, seg.target_language),
+                    buckets[id(seg)],
                 )
-                retry_count += retried
-                fallback_count += fell_back
-                if not ok:
-                    raise StructuredTranslationError(
-                        f"segment {seg.segment_id} could not be translated "
-                        f"safely after retries and split fallback"
+                if key not in group_key_index:
+                    group_key_index[key] = len(groups)
+                    groups.append(
+                        (seg.source_language, seg.target_language,
+                         buckets[id(seg)], [])
                     )
-                seg.translated_text = translated
-                total_target_tokens += target_budget
-                logger.info(
-                    "[STRUCTURED] correlation=%s seg=%s tokens=%d target_budget=%d",
-                    correlation_id, seg.segment_id, seg.token_count, target_budget,
-                )
+                groups[group_key_index[key]][3].append(seg)
+
+            for src_lang, tgt_lang, group_budget, group_segments in groups:
+                # Each budget group is one model batch call.
+                batch_count += 1
+                batch_start = time.monotonic()
+                texts = [s.source_text for s in group_segments]
+                source_tokens_in_group = sum(s.token_count for s in group_segments)
+                batch_generation_budget += group_budget * len(group_segments)
+
+                try:
+                    outputs = self._call_model(
+                        texts, src_lang, tgt_lang, group_budget, deadline
+                    )
+                except StructuredTranslationError:
+                    # The whole batch call failed (model crash, malformed
+                    # result, or deadline): every segment of the batch is
+                    # retried individually.
+                    logger.warning(
+                        "batch call failed for correlation=%s batch=%d; "
+                        "retrying %d segment(s) individually",
+                        correlation_id, batch_count, len(group_segments),
+                    )
+                    outputs = None
+
+                if outputs is not None and len(outputs) != len(group_segments):
+                    # Explicit cardinality invariant: never zip away missing
+                    # or surplus results. Recover every affected segment
+                    # individually; if recovery cannot prove each segment
+                    # translated exactly once, the request fails closed.
+                    logger.warning(
+                        "batch result count %d does not match input count %d "
+                        "for correlation=%s batch=%d; recovering each "
+                        "segment individually",
+                        len(outputs), len(group_segments),
+                        correlation_id, batch_count,
+                    )
+                    outputs = None
+
+                if outputs is None:
+                    pending = [(seg, None) for seg in group_segments]
+                else:
+                    pending = []
+                    for seg, out in zip(group_segments, outputs):
+                        check = seg.protected_map.validate_output(
+                            out, expected_order=seg.placeholder_order
+                        )
+                        if check["ok"]:
+                            seg.translated_text = out
+                            total_target_tokens += budgets[id(seg)]
+                            logger.info(
+                                "[STRUCTURED] correlation=%s seg=%s tokens=%d "
+                                "target_budget=%d (batch=%d)",
+                                correlation_id, seg.segment_id, seg.token_count,
+                                budgets[id(seg)], batch_count,
+                            )
+                        else:
+                            # First-pass attempt failed validation: recovery
+                            # must treat this output as the failed attempt 1.
+                            pending.append((seg, out))
+
+                for seg, failed_out in pending:
+                    if time.monotonic() > deadline:
+                        raise StructuredTranslationError(
+                            f"deadline exceeded (max_total_seconds="
+                            f"{cfg.max_total_seconds}); request aborted "
+                            f"during retry/fallback of {seg.segment_id}; "
+                            f"no partial output returned"
+                        )
+                    ok, translated, retried, fell_back = self._recover_segment(
+                        seg, budgets[id(seg)], deadline, first_text=failed_out
+                    )
+                    retry_count += retried
+                    fallback_count += fell_back
+                    if not ok:
+                        raise StructuredTranslationError(
+                            f"segment {seg.segment_id} could not be translated "
+                            f"safely after retries and split fallback"
+                        )
+                    seg.translated_text = translated
+                    total_target_tokens += budgets[id(seg)]
+
+                batch_metrics.append({
+                    "batch_index": batch_count,
+                    "items": len(group_segments),
+                    "max_target_budget": group_budget,
+                    "per_segment_budgets": [budgets[id(s)] for s in group_segments],
+                    "per_segment_buckets": [buckets[id(s)] for s in group_segments],
+                    "source_tokens": source_tokens_in_group,
+                    "elapsed_seconds": round(time.monotonic() - batch_start, 3),
+                })
 
         # --- machine-readable metrics (computed on the ORIGINAL document) ---
         repeated_terms = _collect_repeated_terms(doc, excluded_ids)
@@ -389,8 +546,10 @@ class StructuredTranslator:
 
         duration = time.monotonic() - start
         logger.info(
-            "[STRUCTURED] correlation=%s done segments=%d duration=%.2fs",
-            correlation_id, len(all_segments), duration,
+            "[STRUCTURED] correlation=%s done segments=%d batches=%d "
+            "retries=%d fallbacks=%d duration=%.2fs",
+            correlation_id, len(all_segments), batch_count,
+            retry_count, fallback_count, duration,
         )
 
         return StructuredTranslationResult(
@@ -401,6 +560,10 @@ class StructuredTranslator:
             total_target_tokens=total_target_tokens,
             retry_count=retry_count,
             fallback_count=fallback_count,
+            batch_count=batch_count,
+            batch_generation_budget=batch_generation_budget,
+            sum_requested_target_tokens=sum_requested_target_tokens,
+            batch_metrics=batch_metrics,
             protected_run_count=protected_run_count,
             duration_seconds=duration,
             fingerprint_ok=True,
@@ -461,6 +624,11 @@ class StructuredTranslator:
                     translate=True,
                 )
                 run.slot_index = 0
+                # The attribute value's protected identifiers are recorded
+                # in placeholder_order (protect_identifiers reserves in
+                # document order), so strict validation covers them: a model
+                # that drops/duplicates/reorders/invents them fails.
+                attr_placeholder_order = pmap.tokens
                 seg = Segment(
                     document_id=self._document_id,
                     segment_id=f"attr:{self._document_id}:{seq:04d}",
@@ -472,7 +640,7 @@ class StructuredTranslator:
                     target_language=target_lang,
                     token_count=token_count,
                     runs=[run],
-                    placeholder_order=[],
+                    placeholder_order=attr_placeholder_order,
                     slots=[run],
                     block_key=f"attr{seq:04d}",
                     block_text=value,
@@ -491,17 +659,44 @@ class StructuredTranslator:
     def _translate_segment(
         self, seg: Segment, target_budget: int, deadline: float
     ) -> tuple:
-        """Translate one segment with validation, retries, and fallback.
+        """Translate one segment with its own model call (single path).
+
+        Backward-compatible wrapper kept for callers outside the batched
+        first pass: makes one model call for the segment, then recovers via
+        retry/fallback if validation fails.
 
         Returns (ok, translated_text, retry_count, fallback_count).
         """
         src_lang = seg.source_language
         tgt_lang = seg.target_language
-
-        # Attempt 1: normal path (placeholders as built)
         text = self._call_model(
             [seg.source_text], src_lang, tgt_lang, target_budget, deadline
         )[0]
+        return self._recover_segment(
+            seg, target_budget, deadline, first_text=text
+        )
+
+    def _recover_segment(
+        self,
+        seg: Segment,
+        target_budget: int,
+        deadline: float,
+        first_text: Optional[str] = None,
+    ) -> tuple:
+        """Validate ``first_text`` (or make a fresh single call), then
+        retry with a stricter placeholder prefix, then split fallback.
+
+        Used by the batched first pass for items that failed validation and
+        for whole-batch call failures. Successful items are never re-sent.
+
+        Returns (ok, translated_text, retry_count, fallback_count).
+        """
+        text = first_text
+        if text is None:
+            text = self._call_model(
+                [seg.source_text], seg.source_language, seg.target_language,
+                target_budget, deadline,
+            )[0]
         check = seg.protected_map.validate_output(
             text, expected_order=seg.placeholder_order
         )
@@ -641,13 +836,30 @@ class StructuredTranslator:
         except Exception as e:
             logger.exception("model call failed: %s", e)
             raise StructuredTranslationError("model call failed") from e
+        # Cardinality invariant: the translator must return exactly one
+        # result per input — never silently drop or add items.
+        if len(results) != len(texts):
+            raise StructuredTranslationError(
+                f"model returned {len(results)} results for "
+                f"{len(texts)} inputs"
+            )
+        # Item validity: every result must carry non-null string text.
+        out: List[str] = []
+        for r in results:
+            text = getattr(r, "translated_text", None)
+            if text is None or not isinstance(text, str):
+                raise StructuredTranslationError(
+                    "model returned an invalid result "
+                    "(None or malformed translated_text)"
+                )
+            out.append(text)
         elapsed = time.monotonic() - start
         if elapsed > self._config.segment_warning_seconds:
             logger.warning(
                 "segment batch took %.1fs (warning threshold %.1fs)",
                 elapsed, self._config.segment_warning_seconds,
             )
-        return [r.translated_text for r in results]
+        return out
 
 
 def _make_run(node_id: str, kind: str, raw: str, protected: str,
