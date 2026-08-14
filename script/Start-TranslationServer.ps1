@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Bootstrap and start the M2M100 GPU translation server.
+    Start the M2M100 GPU translation server (no environment initialization).
 
 .DESCRIPTION
-    Ensures the 'dp' Conda environment is ready, verifies CUDA, then launches
-    the translation server in the foreground. Shows the configured address
-    (host/port) before startup and the exit status on shutdown.
+    Launches the translation server in the foreground using the existing
+    'dp' Conda environment. Assumes the environment is already initialized
+    (run .\script\Initialize-Env.ps1 separately when needed).
 
 .PARAMETER Config
     Path to a translation-server.config.json. Defaults to the repository's
@@ -35,12 +35,6 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot }
 $RepoRoot = Split-Path -Parent $ScriptDir
 Write-Host "[INFO] Repo root:   $RepoRoot"
 
-$InitScript = Join-Path $RepoRoot 'script\Initialize-Env.ps1'
-if (-not (Test-Path $InitScript)) {
-    Write-Error "Initialize-Env.ps1 not found at: $InitScript"
-    exit 1
-}
-
 # ---- Resolve config ----
 if (-not $Config) {
     $ConfigPath = Join-Path $RepoRoot 'translation-server.config.json'
@@ -60,8 +54,6 @@ if (-not (Test-Path $ConfigPath)) {
     exit 1
 }
 Write-Host "[INFO] Config:      $ConfigPath"
-
-# ---- Read config for status display ----
 $ServerHost = '127.0.0.1'
 $ServerPort = 8091
 $ServerWorkers = 1
@@ -94,16 +86,21 @@ Write-Host "[STATUS] Device:      $ModelDevice"
 Write-Host "[STATUS] Warmup:      $(if ($WarmupOnStart) { 'on start' } else { 'lazy (first request)' })"
 Write-Host ""
 
-# ---- Ensure environment (run directly in the current PowerShell host) ----
-Write-Host "[INFO] Verifying Conda environment 'dp'..."
-& $InitScript
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Environment initialization failed."
-    exit 1
+# ---- Pre-flight: is the port already in use? ----
+$listener = Get-NetTCPConnection -LocalPort $ServerPort -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($listener) {
+    $ownerName = ''
+    $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+    if ($owner) { $ownerName = " ($($owner.ProcessName))" }
+    Write-Host ""
+    Write-Host "[ERROR] Port $ServerPort is already in use by process $($listener.OwningProcess)$ownerName."
+    Write-Host "[ERROR] A translation server may already be running on http://${ServerHost}:${ServerPort}."
+    Write-Host "[ERROR] Stop it first, or use a different port in the config, then retry."
+    exit 3
 }
-Write-Host "[OK]   Conda environment 'dp' is ready."
 
-# ---- Locate Conda ----
+# ---- Locate Conda (used only to launch the server in the 'dp' env) ----
 $CondaExe = $null
 $cmd = Get-Command conda -ErrorAction SilentlyContinue
 if ($cmd) { $CondaExe = $cmd.Source }
@@ -123,17 +120,6 @@ if (-not $CondaExe) {
     exit 1
 }
 Write-Host "[INFO] Conda:        $CondaExe"
-
-# ---- Check GPU (quick CUDA probe) ----
-Write-Host "[INFO] Probing CUDA..."
-$gpuName = & $CondaExe run -n dp python -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA')" 2>$null
-$gpuName = ($gpuName | Select-Object -Last 1).ToString().Trim()
-if ($gpuName -and $gpuName -ne 'NO CUDA') {
-    Write-Host "[OK]   GPU:          $gpuName"
-}
-else {
-    Write-Host "[WARN] CUDA not detected. Translation requires an NVIDIA GPU by default." -ForegroundColor Yellow
-}
 
 # ---- Launch server (Python logs the configured host/port) ----
 Write-Host ""

@@ -15,6 +15,12 @@ from .exceptions import StructuredTranslationError
 
 DEFAULT_PREFIX = "__ITRANSLATE_"
 
+# Matches ANY placeholder-like token the project can produce: the default
+# prefix (__ITRANSLATE_) and the stricter retry prefixes (__IT + 4 random
+# alnum + _), each followed by <kind letter><4 digits>_. Used to reject
+# model-invented placeholder-like tokens that are not registered.
+_PLACEHOLDER_TOKEN_RE = re.compile(r"__IT[A-Za-z0-9]{0,16}_[A-Z]\d{4}_")
+
 
 class ProtectedSpan:
     """A span of source content protected from translation."""
@@ -59,20 +65,25 @@ class ProtectionMap:
     def validate_output(
         self, output: str, expected_order: Optional[List[str]] = None
     ) -> Dict[str, object]:
-        """Check every placeholder appears exactly once, in tag-relative order.
+        """Check every placeholder appears exactly once, in EXACT source order.
 
         ``expected_order`` is the placeholder order in the SOURCE text (a
         ProtectionMap reserves tokens in processing order, which can differ
         from source order when an identifier sits inside an English span).
         When omitted, reservation order is used (backwards compatible).
 
-        Order contract (documented, per spec: "validate placeholder order
-        relative to tags"):
-        - tag placeholders must appear in source order;
-        - every non-tag placeholder must stay inside the same tag interval
-          (the number of tags before it) as in the source — the model may
-          reorder protected spans WITHIN a tag interval (its own rendering),
-          but never move them across tag boundaries.
+        Strict contract (documented, production requirement):
+        - the complete known-placeholder sequence in the model output must
+          equal ``expected_order`` EXACTLY — tags, entities, bare-ampersand
+          runs, English spans, identifiers/model numbers/SKUs/URLs/emails/
+          versions, and glossary/protected terms included. Reordering within
+          a tag interval is REJECTED: protected content must stay in its
+          original source slot;
+        - any missing, duplicated, altered, or unknown placeholder is
+          rejected;
+        - any model-invented placeholder-like token matching the project's
+          placeholder syntax (including alternate retry prefixes) is
+          rejected unless registered in this ProtectionMap.
 
         Returns {"ok": bool, "issues": [str,...], "order_ok": bool}.
         """
@@ -80,15 +91,14 @@ class ProtectionMap:
         expected = self.tokens
         expected_order = expected_order if expected_order is not None else expected
 
-        found_order: List[str] = []
-        seen: set = set()
-        # Scan for placeholder tokens in first-occurrence order
-        for match in re.finditer(re.escape(self.prefix) + r"[A-Z]\d{4}_", output):
+        # 1) Reject model-invented placeholder-like tokens (any prefix
+        #    variant: default and retry prefixes) not registered here.
+        for match in _PLACEHOLDER_TOKEN_RE.finditer(output):
             tok = match.group(0)
-            if tok in self._spans and tok not in seen:
-                found_order.append(tok)
-                seen.add(tok)
+            if tok not in self._spans:
+                issues.append(f"unknown placeholder invented: {tok}")
 
+        # 2) Missing / duplicated / altered known placeholders.
         for token in expected:
             count = output.count(token)
             if count == 0:
@@ -96,38 +106,21 @@ class ProtectionMap:
             elif count > 1:
                 issues.append(f"placeholder duplicated ({count}x): {token}")
 
-        # Tag-relative order checks
-        def tag_sequence(tokens: List[str]) -> List[str]:
-            return [t for t in tokens
-                    if self._spans[t].kind in ("tag_start", "tag_end")]
+        # 3) EXACT full-sequence order: the known-placeholder sequence in
+        #    first-occurrence order must equal the source order exactly.
+        found_order: List[str] = []
+        seen: set = set()
+        for match in re.finditer(re.escape(self.prefix) + r"[A-Z]\d{4}_", output):
+            tok = match.group(0)
+            if tok in self._spans and tok not in seen:
+                found_order.append(tok)
+                seen.add(tok)
 
-        def tag_intervals(tokens: List[str]) -> Dict[str, int]:
-            intervals: Dict[str, int] = {}
-            tags_before = 0
-            for t in tokens:
-                if self._spans[t].kind in ("tag_start", "tag_end"):
-                    tags_before += 1
-                else:
-                    intervals[t] = tags_before
-            return intervals
-
-        order_ok = True
-        if tag_sequence(found_order) != tag_sequence(expected_order):
-            order_ok = False
+        order_ok = found_order == expected_order
+        if not order_ok:
             issues.append(
-                f"tag placeholder order changed: expected "
-                f"{tag_sequence(expected_order)}, got {tag_sequence(found_order)}"
-            )
-        found_intervals = tag_intervals(found_order)
-        expected_intervals = tag_intervals(expected_order)
-        moved = [
-            t for t in expected_intervals
-            if found_intervals.get(t) != expected_intervals[t]
-        ]
-        if moved:
-            order_ok = False
-            issues.append(
-                f"protected spans moved across tag boundaries: {moved}"
+                f"placeholder sequence changed: expected {expected_order}, "
+                f"got {found_order}"
             )
 
         return {"ok": not issues, "issues": issues, "order_ok": order_ok}
@@ -162,6 +155,23 @@ class ProtectionMap:
             for m in re.finditer(pattern, output)
         ]
         return pieces, protected_sequence
+
+
+def find_unknown_placeholders(
+    output: str, protection_map: ProtectionMap
+) -> List[str]:
+    """Return placeholder-like tokens in ``output`` not registered in the map.
+
+    Detects model-invented tokens matching the project's placeholder syntax
+    — the default prefix and the stricter retry prefixes — that are not
+    registered in ``protection_map``. Used as a fail-closed guard in both
+    validation and reconstruction (defense in depth).
+    """
+    return [
+        m.group(0)
+        for m in _PLACEHOLDER_TOKEN_RE.finditer(output)
+        if m.group(0) not in protection_map._spans
+    ]
 
 
 def assert_prefix_safe(text: str, prefix: str = DEFAULT_PREFIX) -> None:

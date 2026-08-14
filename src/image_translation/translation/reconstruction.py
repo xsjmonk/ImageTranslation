@@ -6,6 +6,16 @@ Reconstruction contract (documented):
   English, identifiers) in first-occurrence order; the pieces align 1:1 with
   the segment's recorded slots (``slots[i]`` is the text between
   placeholder[i-1] and placeholder[i]);
+- STRICT source-order contract: the complete protected-token sequence in the
+  model output must equal the segment's source ``placeholder_order`` EXACTLY
+  — tags, entities, bare-ampersand runs, English spans, identifiers, and
+  glossary terms included. Reordering within a tag interval is rejected:
+  protected content stays in its original source slot and translated pieces
+  map to their source slots from the exact sequence, never positionally
+  after a reordered placeholder sequence;
+- model-invented placeholder-like tokens (default or retry prefixes) that
+  are not registered in the segment's ProtectionMap fail closed; they can
+  never leak into the output;
 - protected runs (English, identifiers, tags) are restored from their ORIGINAL
   raw text — never from model output;
 - chinese runs consume exactly one model-output piece each; a node split
@@ -31,6 +41,7 @@ from typing import Dict, List, Optional, Set
 from .chapter_chunking import Segment
 from .exceptions import StructuredTranslationError
 from .html_document import HTMLDocument
+from .html_protection import find_unknown_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +75,22 @@ def rebuild_document(
     }
 
     for seg in segments:
+        # Fail closed on model-invented placeholder-like tokens (default or
+        # retry prefixes) not registered in this segment's protection map —
+        # they must never leak into the output as text.
+        unknown = find_unknown_placeholders(seg.translated_text, seg.protected_map)
+        if unknown:
+            raise StructuredTranslationError(
+                f"segment {seg.segment_id}: unknown placeholder(s) invented "
+                f"by the model: {unknown}; refusing to reconstruct"
+            )
+
         pieces, protected_sequence = seg.protected_map.restore_split(
             seg.translated_text
         )
 
         # Alignment: pieces must map 1:1 onto the recorded slots, and the
-        # placeholder sequence must match the source layout exactly.
+        # placeholder sequence must match the source layout EXACTLY.
         if len(pieces) != len(seg.slots):
             raise StructuredTranslationError(
                 f"segment {seg.segment_id}: output piece count {len(pieces)} "
@@ -77,41 +98,19 @@ def rebuild_document(
                 f"were not preserved in order)"
             )
         expected_order = seg.placeholder_order
-        # Tag-relative order validation (same contract as validate_output):
-        # tags in source order; non-tag spans stay in the same tag interval.
-        # Within an interval the model may reorder spans — pieces are then
-        # mapped positionally (the model's own rendering).
-        def _kind(tok):
-            span = seg.protected_map.span(tok)
-            return span.kind if span is not None else ""
-
-        tag_expected = [t for t in expected_order if _kind(t) in ("tag_start", "tag_end")]
-        tag_found = [s.token for s in protected_sequence
-                     if s.kind in ("tag_start", "tag_end")]
-        if tag_found != tag_expected:
+        # Strict full-sequence contract: the complete protected-token
+        # sequence in the model output must equal the source placeholder
+        # order exactly — tags, entities, bare-ampersand runs, English spans,
+        # identifiers, and glossary terms included. Reordering within a tag
+        # interval is REJECTED: protected content must stay in its original
+        # source slot, and translated pieces map to their source slots
+        # positionally from the exact sequence.
+        found_order = [s.token for s in protected_sequence]
+        if found_order != expected_order:
             raise StructuredTranslationError(
-                f"segment {seg.segment_id}: tag placeholder order changed; "
-                f"refusing to reconstruct"
-            )
-
-        def _intervals(tokens):
-            intervals = {}
-            tags_before = 0
-            for t in tokens:
-                if _kind(t) in ("tag_start", "tag_end"):
-                    tags_before += 1
-                else:
-                    intervals[t] = tags_before
-            return intervals
-
-        found_intervals = _intervals([s.token for s in protected_sequence])
-        expected_intervals = _intervals(expected_order)
-        moved = [t for t in expected_intervals
-                 if found_intervals.get(t) != expected_intervals[t]]
-        if moved:
-            raise StructuredTranslationError(
-                f"segment {seg.segment_id}: protected spans moved across "
-                f"tag boundaries: {moved}; refusing to reconstruct"
+                f"segment {seg.segment_id}: protected placeholder sequence "
+                f"differs from source order (expected {expected_order}, "
+                f"got {found_order}); refusing to reconstruct"
             )
 
         # Walk the runs in source order: chinese runs consume their piece
