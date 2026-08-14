@@ -89,6 +89,10 @@ class SlotCorruptingFake(Translator):
     def runtime_info(self):
         return None
 
+
+    def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
+        """Token count used by HTML segmentation (no model call)."""
+        return max(1, (len(text) + 1) // 2)
     def translate_text(self, text, source_lang="zh", target_lang="en", max_new_tokens=None):
         return self.translate_batch_texts([text], source_lang, target_lang, max_new_tokens)[0]
 

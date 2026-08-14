@@ -48,6 +48,8 @@ class HealthResponse(BaseModel):
     snapshot_path: str = ""
     cache_status: str = ""      # cache_hit | download | none
     local_files_only: bool = False
+    offline: bool = False        # effective offline (local_files_only OR
+                                 # downloads disabled)
 
 
 class ErrorResponse(BaseModel):

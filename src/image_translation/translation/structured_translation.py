@@ -209,7 +209,15 @@ def _collect_identifier_occurrences(segments: List[Segment], cap: int = 50) -> d
 
 
 def _get_measure_tokenizer(model_name: str, model_cache_dir: Optional[str]):
-    """Lazily load the tokenizer used ONLY for token measurement."""
+    """TEST-ONLY compatibility helper (tokenizer construction for direct
+    segment_blocks() tests).
+
+    Production HTML translation measures tokens through
+    ``Translator.measure_source_tokens()`` — the EXACT tokenizer loaded for
+    inference (authoritative cache policy, revision, resolved snapshot).
+    This helper is retained only for tests that exercise segmentation
+    directly and must not be used by the production path.
+    """
     key = (model_name, model_cache_dir)
     if key not in _tokenizer_cache:
         from transformers import M2M100Tokenizer
@@ -339,12 +347,13 @@ class StructuredTranslator:
             excluded_classes=cfg.excluded_classes,
         )
         glossary = list(cfg.glossary)
-        measure = lambda text: len(
-            _get_measure_tokenizer(
-                self._translation_config.model_name,
-                self._translation_config.model_cache_dir,
-            )(text, truncation=False)["input_ids"]
-        )
+        # Token measurement uses the EXACT tokenizer already loaded by the
+        # injected translator (authoritative cache policy, revision, and
+        # resolved snapshot; truncation=False). The model loads lazily on
+        # the first measurement and is then reused for inference — no
+        # second tokenizer copy, no independent Hugging Face access.
+        def measure(text: str) -> int:
+            return self._translator.measure_source_tokens(text, source_lang)
         try:
             segments = segment_blocks(
                 doc,

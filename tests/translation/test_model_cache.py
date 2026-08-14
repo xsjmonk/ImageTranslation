@@ -72,28 +72,95 @@ class FakeHub:
 
 
 def _patch_transformers(monkeypatch):
-    """Mock tokenizer/model from_pretrained; records (kind, path, kwargs)."""
+    """Mock tokenizer/model from_pretrained; records (kind, path, kwargs).
+
+    The tokenizer is a full fake with measure (str) and batch (tensors)
+    paths; batch_decode reconstructs placeholder-preserving translations
+    from the last tokenized batch so the whole structured flow works.
+    Returns a LoadRecord (a list of (kind, path, kwargs) entries) with
+    ``.tokenizer`` / ``.model`` referencing the fake instances.
+    """
     import transformers
 
-    loaded: list = []
+    class LoadRecord(list):
+        def __init__(self):
+            super().__init__()
+            self.tokenizer = None
+            self.model = None
 
-    def _tokenizer(path, **kw):
+    loaded = LoadRecord()
+
+    class FakeM2MTokenizer:
+        def __init__(self):
+            self.src_lang = None
+            self.last_batch: list = []
+            self.measure_calls: list = []
+
+        def __call__(self, text, truncation=False, return_tensors=None,
+                     padding=False, **_kw):
+            if isinstance(text, str):
+                n = max(1, (len(text) + 1) // 2)
+                self.measure_calls.append((text, n))
+                return {"input_ids": list(range(n))}
+            self.last_batch = list(text)
+            import torch
+            n = len(text)
+            return {
+                "input_ids": torch.zeros(n, 4, dtype=torch.long),
+                "attention_mask": torch.ones(n, 4, dtype=torch.long),
+            }
+
+        def get_lang_id(self, lang):
+            return 1
+
+        def batch_decode(self, generated, skip_special_tokens=True):
+            import re
+            return [
+                re.sub(r"[\u4e00-\u9fff]+", lambda m: "EN:" + m.group(0), t)
+                for t in self.last_batch
+            ]
+
+    class FakeM2MModel:
+        config = SimpleNamespace(max_position_embeddings=1024)
+
+        def eval(self):
+            return self
+
+        def to(self, *a, **k):
+            return self
+
+        def half(self):
+            return self
+
+        def generate(self, **kw):
+            import torch
+            return torch.zeros(len(kw["input_ids"]), 6, dtype=torch.long)
+
+        def parameters(self):
+            import torch
+            return iter([torch.zeros(1)])
+
+    tokenizer = FakeM2MTokenizer()
+    model = FakeM2MModel()
+    loaded.tokenizer = tokenizer
+    loaded.model = model
+
+    def _tok(path, kw):
         loaded.append(("tokenizer", str(path), kw))
-        return SimpleNamespace(src_lang=None)
+        return tokenizer
 
-    def _model(path, **kw):
+    def _mod(path, kw):
         loaded.append(("model", str(path), kw))
-        m = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=1024))
-        m.eval = lambda: m
-        m.to = lambda *a, **k: m
-        m.half = lambda: m
-        return m
+        return model
 
-    monkeypatch.setattr(transformers.M2M100Tokenizer, "from_pretrained",
-                        classmethod(lambda cls, path, **kw: _tokenizer(path, **kw)))
-    monkeypatch.setattr(transformers.M2M100ForConditionalGeneration,
-                        "from_pretrained",
-                        classmethod(lambda cls, path, **kw: _model(path, **kw)))
+    monkeypatch.setattr(
+        transformers.M2M100Tokenizer, "from_pretrained",
+        classmethod(lambda cls, path, **kw: _tok(path, kw)),
+    )
+    monkeypatch.setattr(
+        transformers.M2M100ForConditionalGeneration, "from_pretrained",
+        classmethod(lambda cls, path, **kw: _mod(path, kw)),
+    )
     return loaded
 
 
@@ -282,3 +349,137 @@ class TestModelResolution:
         from image_translation.translation.models import TranslationResult
         calls_before = len(hub.calls)
         assert calls_before == 0
+
+
+# ---------------------------------------------------------------------------
+# HTML token measurement must use the inference tokenizer (no second
+# tokenizer, no independent Hugging Face access).
+# ---------------------------------------------------------------------------
+
+class TestHtmlMeasurementUsesLoadedTokenizer:
+    @staticmethod
+    def _make(hub, loaded, tmp_path, *, cache=None, offline=False,
+              revision="main"):
+        from image_translation.translation.config import StructuredConfig
+        from image_translation.translation.structured_translation import (
+            StructuredTranslator,
+        )
+
+        cache = cache or str(tmp_path / "cache")
+        cfg = TranslationConfig(
+            device="cpu",
+            model_cache_dir=cache,
+            local_files_only=offline,
+            allow_model_download=not offline,
+            model_revision=revision,
+        )
+        t = M2M100Translator(cfg)
+        st = StructuredTranslator(
+            t, StructuredConfig(max_segment_tokens=40), TranslationConfig()
+        )
+        return t, st
+
+    def test_html_measurement_uses_inference_tokenizer(self, hub, loaded, tmp_path):
+        t, st = self._make(hub, loaded, tmp_path)
+        res = st.translate("<p>中文内容，耐磨耐用。</p>")
+        assert res.translated_html
+        # the loaded inference tokenizer performed the measurement
+        assert loaded[0][0] == "tokenizer" and loaded[1][0] == "model"
+        assert len(loaded) == 2  # exactly one tokenizer + one model load
+
+    def test_no_second_from_pretrained_during_html_translation(self, hub, loaded, tmp_path):
+        t, st = self._make(hub, loaded, tmp_path)
+        st.translate("<p>中文</p><p>English text</p>")
+        kinds = [c[0] for c in loaded]
+        assert kinds == ["tokenizer", "model"]  # no extra tokenizer load
+
+    def test_no_remote_identifier_after_load(self, hub, loaded, tmp_path):
+        t, st = self._make(hub, loaded, tmp_path)
+        st.translate("<p>中文</p>")
+        # both loads used the resolved snapshot path, never the repo id
+        snapshot = hub.cached[(str((tmp_path / "cache").resolve()), "main")]
+        assert all(c[1] == snapshot for c in loaded)
+
+    def test_offline_html_succeeds_with_complete_cache_zero_network(self, hub, loaded, tmp_path):
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        cache = str(cache_dir.resolve())
+        hub.seed(cache)
+        t, st = self._make(hub, loaded, tmp_path, cache=cache, offline=True)
+        html = "<p>中文 X13 与 English A 中文 X1300。</p>"
+        res = st.translate(html)
+        assert res.translated_html
+        assert "X13" in res.translated_html and "X1300" in res.translated_html
+        # zero network: only local-only resolution calls
+        assert hub.download_calls() == []
+        assert all(c["local_files_only"] is True for c in hub.calls)
+        assert t.runtime_info.offline is True
+
+    def test_offline_html_fails_clearly_when_cache_missing(self, hub, loaded, tmp_path):
+        cache = tmp_path / "missing-cache"
+        t, st = self._make(hub, loaded, tmp_path, cache=str(cache), offline=True)
+        with pytest.raises(TranslationModelLoadError, match="does not exist"):
+            st.translate("<p>中文</p>")
+        assert hub.calls == []  # zero network access
+
+    def test_non_default_revision_used_by_inference_and_measurement(self, hub, loaded, tmp_path):
+        t, st = self._make(hub, loaded, tmp_path, revision="v2.0")
+        st.translate("<p>中文</p>")
+        assert all(c["revision"] == "v2.0" for c in hub.calls)
+        assert t.runtime_info.model_revision == "v2.0"
+
+    def test_segmentation_uses_inference_tokenizer_counts(self, hub, loaded, tmp_path):
+        """A tokenizer with deliberately different token counts must drive
+        segmentation — proving measurement uses the loaded inference
+        tokenizer, not a separately constructed one."""
+        from image_translation.translation.config import StructuredConfig
+        from image_translation.translation.structured_translation import (
+            StructuredTranslator,
+        )
+
+        cache = str((tmp_path / "cache").resolve())
+        hub.seed(cache)
+        cfg = TranslationConfig(device="cpu", model_cache_dir=cache)
+        t = M2M100Translator(cfg)
+        t.warmup()
+        tokenizer = loaded.tokenizer
+        base_call = type(tokenizer).__call__
+
+        class OneTokenPerChar(type(tokenizer)):
+            def __call__(self, text, truncation=False, **kw):
+                if isinstance(text, str):
+                    n = len(text)  # 1 token per char (vs (len+1)//2)
+                    self.measure_calls.append((text, n))
+                    return {"input_ids": list(range(n))}
+                return base_call(self, text, truncation, **kw)
+
+        tokenizer.__class__ = OneTokenPerChar
+
+        st = StructuredTranslator(
+            t, StructuredConfig(max_segment_tokens=30), TranslationConfig()
+        )
+        # 40 chars -> 40 tokens under the inference tokenizer's 1-per-char
+        # counting -> exceeds budget 30 -> paragraph must split. The
+        # default (len+1)//2 counting would have kept it as one 20-token
+        # segment — proving the loaded tokenizer drove the split.
+        res = st.translate("<p>" + "中" * 40 + "</p>")
+        assert res.segment_count >= 2
+
+    def test_long_mixed_html_invariants_preserved(self, hub, loaded, tmp_path):
+        t, st = self._make(hub, loaded, tmp_path)
+        html = (
+            "<p>中文 X13 与 English A 中文 X1300 与 English B。</p>"
+            "<p>前&nbsp;中文&#160;中间&amp;中文&#xA0;结尾。<br/>更多说明见文档。</p>"
+        )
+        res = st.translate(html)
+        out = res.translated_html
+        # identifiers in source order
+        assert out.find("X13") < out.find("English A") < out.find("X1300") \
+            < out.find("English B")
+        # entities and tags preserved
+        assert out.count("&nbsp;") == 1 and out.count("&#160;") == 1
+        assert out.count("&amp;") == 1 and out.count("&#xA0;") == 1
+        assert "<br/>" in out
+        # Chinese translated in place
+        assert "EN:中文" in out
+        assert "__IT" not in out

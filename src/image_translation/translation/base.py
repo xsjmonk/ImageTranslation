@@ -108,6 +108,23 @@ class Translator(ABC):
         """Human-readable translator name."""
         ...
 
+    def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
+        """Measure source tokens WITHOUT truncation using the EXACT
+        tokenizer loaded for inference.
+
+        Implementations must:
+        - load the model/tokenizer (lazy) exactly once;
+        - set the source language consistently with inference;
+        - tokenize with ``truncation=False``;
+        - never call ``from_pretrained`` a second time and never use a
+          second cache or a remote model identifier.
+
+        Structured (HTML) segmentation uses this method so the configured
+        cache policy, revision, and resolved snapshot are authoritative for
+        measurement as well.
+        """
+        raise NotImplementedError
+
     @property
     def runtime_info(self) -> "TranslationRuntimeInfo":
         """Return runtime metadata about the loaded engine."""

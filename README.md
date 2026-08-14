@@ -172,7 +172,8 @@ The model download location is configurable under `translation`:
 
   or simply start the server once with `allow_model_download: true` — the first warmup downloads and logs `Model download COMPLETE`.
 - **Fully offline** after pre-download: set `"allow_model_download": false, "local_files_only": true`. Startup then resolves and loads only from the configured cache; a missing/incomplete model fails with an actionable error and never touches the network, never falls back to another cache, and never silently switches to CPU. Contradictory `local_files_only: true` + `allow_model_download: true` is rejected at config validation.
-- **Verify the resolved path**: startup logs `Model cache HIT (reused): <snapshot>` or `Model download COMPLETE: <snapshot>`, and `GET /health` returns `cache_dir`, `snapshot_path`, `cache_status` (`cache_hit`/`download`), `model_revision`, `local_files_only`, plus the existing `device`/`ready` fields.
+- **Verify the resolved path**: startup logs `Model cache HIT (reused): <snapshot>` or `Model download COMPLETE: <snapshot>`, and `GET /health` returns `cache_dir`, `snapshot_path`, `cache_status` (`cache_hit`/`download`), `model_revision`, `local_files_only`, `offline` (effective mode), plus the existing `device`/`ready` fields.
+- **HTML measurement**: long-HTML segment-size measurement uses the **exact tokenizer loaded for inference** (same resolved snapshot, revision, and cache policy, `truncation=False`). No second tokenizer is constructed and no independent Hugging Face access happens after the model is loaded — offline mode is honored by HTML translation too.
 - **Permissions and disk**: the model is ~2.5 GB; the cache root must be writable (the configured directory is created if its parent is valid). Incomplete snapshots are detected before the server reports ready.
 
 ### Long-running requests

@@ -15,7 +15,7 @@ from .exceptions import (
     TranslationInputError,
     TranslationModelLoadError,
 )
-from .models import TranslationResult, TranslationRuntimeInfo
+from .models import ResolvedModel, TranslationResult, TranslationRuntimeInfo
 from .text_utils import preprocess
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,10 @@ class M2M100Translator(Translator):
         self._snapshot_path: str = ""
         self._cache_status: str = ""
         self._cache_dir: str = ""
+        self._resolved: Optional[ResolvedModel] = None
+        # One computed effective-offline flag for resolution, tokenizer,
+        # model, and HTML token measurement.
+        self._offline = config.local_files_only or not config.allow_model_download
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -73,6 +77,7 @@ class M2M100Translator(Translator):
             snapshot_path=self._snapshot_path,
             cache_status=self._cache_status,
             local_files_only=self._config.local_files_only,
+            offline=self._offline,
         )
 
     def translate_text(
@@ -125,6 +130,24 @@ class M2M100Translator(Translator):
     def warmup(self) -> None:
         """Explicitly trigger model loading. Idempotent."""
         self._ensure_loaded()
+
+    def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
+        """Measure source tokens WITHOUT truncation using the EXACT
+        tokenizer loaded for inference.
+
+        - lazy-loads the model/tokenizer exactly once (same authoritative
+          resolution used by inference);
+        - sets the source language consistently with inference;
+        - tokenizes with ``truncation=False``;
+        - never calls ``from_pretrained`` a second time and never uses a
+          second cache or remote model identifier.
+        """
+        self._ensure_loaded()
+        with self._lock:
+            self._tokenizer.src_lang = source_lang
+            return len(
+                self._tokenizer(text, truncation=False)["input_ids"]
+            )
 
     # ------------------------------------------------------------------
     # Internal: lazy loading + GPU setup
@@ -206,7 +229,7 @@ class M2M100Translator(Translator):
         from huggingface_hub import snapshot_download
 
         cfg = self._config
-        offline = cfg.local_files_only or not cfg.allow_model_download
+        offline = self._offline
 
         cache_root: Optional[str] = None
         if cfg.model_cache_dir:
@@ -274,7 +297,14 @@ class M2M100Translator(Translator):
             logger.info("[INFO] Model download COMPLETE: %s", snapshot_path)
 
         self._verify_snapshot(snapshot_path)
-        return snapshot_path, cache_status
+        return ResolvedModel(
+            snapshot_path=snapshot_path,
+            model_name=cfg.model_name,
+            revision=cfg.model_revision,
+            cache_dir=cache_root or "",
+            cache_status=cache_status,
+            offline=offline,
+        )
 
     @staticmethod
     def _verify_snapshot(snapshot_path: str) -> None:
@@ -320,11 +350,11 @@ class M2M100Translator(Translator):
 
         # --- Authoritative model resolution (cache policy) ---
         logger.info("[INFO] Loading translation model: %s", self._config.model_name)
-        snapshot_path, cache_status = self._resolve_model_snapshot()
-        offline = self._config.local_files_only or not self._config.allow_model_download
+        resolved = self._resolve_model_snapshot()
+        snapshot_path = resolved.snapshot_path
         # Both the tokenizer and the model load from the SAME resolved
         # snapshot for the SAME revision; no ambiguous remote identifier.
-        load_kwargs = {"local_files_only": offline}
+        load_kwargs = {"local_files_only": self._offline}
 
         try:
             tokenizer = M2M100Tokenizer.from_pretrained(
@@ -363,11 +393,12 @@ class M2M100Translator(Translator):
         self._tokenizer = tokenizer
         self._device_str = device_str
         self._snapshot_path = snapshot_path
-        self._cache_status = cache_status
+        self._cache_status = resolved.cache_status
         self._cache_dir = self._config.model_cache_dir or ""
+        self._resolved = resolved
 
         logger.info("[INFO] Model ready (snapshot=%s, %s).",
-                    snapshot_path, cache_status)
+                    snapshot_path, resolved.cache_status)
 
     def _resolve_precision(self, model, device_str: str) -> str:
         """Apply precision strategy and return the effective precision name.

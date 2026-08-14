@@ -93,6 +93,7 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
             snapshot_path=info.snapshot_path,
             cache_status=info.cache_status,
             local_files_only=info.local_files_only,
+            offline=info.offline,
         )
 
     @app.post("/translate", response_model=TranslateResponse)

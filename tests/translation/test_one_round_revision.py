@@ -46,6 +46,10 @@ class FakeTranslator(Translator):
     def runtime_info(self):
         return None
 
+
+    def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
+        """Token count used by HTML segmentation (no model call)."""
+        return max(1, (len(text) + 1) // 2)
     def translate_text(self, text, source_lang="zh", target_lang="en", max_new_tokens=None):
         return self.translate_batch_texts(
             [text], source_lang, target_lang, max_new_tokens
@@ -411,15 +415,19 @@ class TestNoTruncation:
         with pytest.raises(TranslationInputError, match="token budget"):
             t._translate_impl(["x" * 900], "zh", "en", max_new_tokens=256)
 
-    def test_structured_over_budget_segment_fails(self, monkeypatch):
-        """An indivisible over-budget unit fails with a structured error."""
-        class HugeTok:
-            def __call__(self, text, truncation=False):
-                # every single character already exceeds the budget
-                return {"input_ids": list(range(len(text) * 100))}
+    def test_structured_over_budget_segment_fails(self):
+        """An indivisible over-budget unit fails with a structured error.
 
-        monkeypatch.setattr(st_mod, "_get_measure_tokenizer", lambda *a, **k: HugeTok())
-        fake = FakeTranslator()
+        The huge token count is injected through the TRANSLATOR's
+        measure_source_tokens (the exact path production segmentation
+        uses) — not through a separately constructed tokenizer.
+        """
+        class HugeMeasureFake(FakeTranslator):
+            def measure_source_tokens(self, text, source_lang="zh"):
+                # every single character already exceeds the budget
+                return len(text) * 100
+
+        fake = HugeMeasureFake()
         cfg = StructuredConfig(max_segment_tokens=8)
         with pytest.raises(StructuredTranslationError, match="indivisible"):
             StructuredTranslator(

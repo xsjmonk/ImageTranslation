@@ -46,3 +46,19 @@ class TranslationRuntimeInfo:
     snapshot_path: str = ""      # resolved snapshot directory actually loaded
     cache_status: str = ""       # "cache_hit" | "download" | "none"
     local_files_only: bool = False
+    offline: bool = False        # effective offline (local_files_only OR
+                                 # downloads disabled)
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    """Authoritative model-resolution result, created ONCE during loading
+    and retained by the translator. HTML token measurement, tokenizer
+    loading, and model loading all use this same resolution — nothing
+    rediscovers the model independently."""
+    snapshot_path: str
+    model_name: str
+    revision: str
+    cache_dir: str               # "" = HF default cache
+    cache_status: str            # "cache_hit" | "download"
+    offline: bool                # effective offline flag

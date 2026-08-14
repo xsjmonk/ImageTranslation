@@ -37,12 +37,22 @@ class FakeTranslator(Translator):
     def runtime_info(self) -> TranslationRuntimeInfo:
         return TranslationRuntimeInfo(
             model_name="fake",
+            model_revision="main",
             device="cpu",
             precision="float32",
             cuda_available=False,
             ready=self._ready,
+            cache_dir="C:/models/hf",
+            snapshot_path="C:/models/hf/snap",
+            cache_status="cache_hit",
+            local_files_only=True,
+            offline=True,
         )
 
+
+    def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
+        """Token count used by HTML segmentation (no model call)."""
+        return max(1, (len(text) + 1) // 2)
     def translate_text(
         self, text: str, source_lang: str = "zh", target_lang: str = "en"
     ) -> TranslationResult:
@@ -116,6 +126,23 @@ class TestHealth:
         data = resp.json()
         assert "model" in data
         assert "device" in data
+
+    def test_health_exposes_cache_diagnostics(self, client):
+        resp = client.get("/health")
+        data = resp.json()
+        # model, revision, device, precision, cache root, snapshot path,
+        # cache status, and ready state are observable
+        assert data["model"] == "fake"
+        assert data["model_revision"] == "main"
+        assert data["device"] == "cpu"
+        assert data["precision"] == "float32"
+        assert data["cache_dir"] == "C:/models/hf"
+        assert data["snapshot_path"] == "C:/models/hf/snap"
+        assert data["cache_status"] == "cache_hit"
+        assert data["ready"] is True
+        # effective offline mode is accurate (downloads disabled)
+        assert data["offline"] is True
+        assert data["local_files_only"] is True
 
     def test_health_not_ready_reports_starting(self):
         c = _make_client(FakeTranslator(ready=False))
