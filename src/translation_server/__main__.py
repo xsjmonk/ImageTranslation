@@ -38,9 +38,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERROR] Config error: {e}", file=sys.stderr)
         return 1
 
-    if args.check_cache:
-        return _check_cache(server_config)
-
     # Setup logging
     log_level = getattr(logging, server_config.server.log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -49,8 +46,18 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
     )
 
-    # Build runtime + app
+    # Config-derived cache diagnostics (no resolution, no model load)
     from .runtime import TranslationRuntime
+    diag = TranslationRuntime(server_config).cache_diagnostics()
+    logging.getLogger("translation_server").info(
+        "[INFO] Model cache: %s (offline=%s revision=%s)",
+        diag["cache_dir"] or "HF default", diag["offline"], diag["revision"],
+    )
+
+    if args.check_cache:
+        return _check_cache(server_config)
+
+    # Build runtime + app
     from .app import create_app
 
     runtime = TranslationRuntime(server_config)

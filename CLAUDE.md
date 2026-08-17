@@ -3,15 +3,15 @@
 Read `AGENTS.md` first — it is the repository's primary agent instruction
 (dependency rules, test commands, translation-server notes).
 
-For architecture-sensitive work — adding a feature, fixing a bug,
-refactoring, selecting a library, or changing services, parsers, model
-loaders, clients, configuration, or infrastructure — read the canonical
-architecture skill and its references before editing:
+Before writing or editing any programming code, tests, scripts,
+configuration, or infrastructure definition, read the canonical
+architecture skill and follow its mandatory pre-coding gate:
 
 > Read `.agent-skills/reuse-first-architecture/SKILL.md` and follow it for
 > this task.
 
-It is mandatory workflow, not optional advice:
+The pre-coding gate is mandatory before every programming edit, even when
+the change appears small or trivial:
 
 - search before build: reuse / adapt / extend / replace existing
   capabilities, naming the component and its contract;

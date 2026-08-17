@@ -30,6 +30,21 @@ class TranslationRuntime:
         """Trigger model loading."""
         self.translator.warmup()  # type: ignore[union-attr]
 
+    def cache_diagnostics(self) -> dict:
+        """Config-derived cache diagnostics for startup logging.
+
+        Read-only (no snapshot resolution, no model load, no network):
+        reports the configured cache root, effective offline flag, and
+        model revision exactly as the translator will honor them.
+        """
+        t = self.config.translation
+        return {
+            "model": t.model_name,
+            "revision": t.model_revision,
+            "cache_dir": t.model_cache_dir or "",
+            "offline": t.local_files_only or not t.allow_model_download,
+        }
+
 
 def build_runtime(config_path: Optional[Path] = None) -> TranslationRuntime:
     """Load config and create a TranslationRuntime.

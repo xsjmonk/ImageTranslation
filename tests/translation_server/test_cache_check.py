@@ -332,3 +332,43 @@ class TestCacheEndpoint:
         data = resp.json()
         assert data["cache_status"] == "error"
         assert data["ready"] is False
+
+
+class TestStartupCacheDiagnostics:
+    """Config-derived cache diagnostics logged at startup (no model load)."""
+
+    def test_cache_diagnostics_config_derived(self, tmp_path):
+        from translation_server.config import load_server_config
+        from translation_server.runtime import TranslationRuntime
+
+        cfg_path = _write_config(tmp_path, str(tmp_path / "cache"))
+        runtime = TranslationRuntime(load_server_config(cfg_path))
+        diag = runtime.cache_diagnostics()
+        assert diag["model"] == "facebook/m2m100_418M"
+        assert diag["revision"] == "main"
+        assert diag["cache_dir"] == str((tmp_path / "cache").resolve())
+        assert diag["offline"] is False
+
+    def test_cache_diagnostics_offline(self, tmp_path):
+        from translation_server.config import load_server_config
+        from translation_server.runtime import TranslationRuntime
+
+        cfg_path = _write_config(tmp_path, str(tmp_path / "cache"), offline=True)
+        runtime = TranslationRuntime(load_server_config(cfg_path))
+        assert runtime.cache_diagnostics()["offline"] is True
+
+    def test_startup_logs_cache_line(self, hub, no_model_load, tmp_path, caplog):
+        """main() logs the cache diagnostics line before any model work."""
+        import logging
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        cfg_path = _write_config(tmp_path, str(cache_dir.resolve()))
+
+        from translation_server.__main__ import main
+
+        with caplog.at_level(logging.INFO, logger="translation_server"):
+            code = main(["-c", str(cfg_path), "--check-cache"])
+        assert code == 0
+        assert any("Model cache:" in r.message for r in caplog.records)
+        assert any("offline=False" in r.message for r in caplog.records)

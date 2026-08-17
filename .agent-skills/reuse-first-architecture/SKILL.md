@@ -1,6 +1,6 @@
 ---
 name: reuse-first-architecture
-description: Apply reuse-first architecture, SOLID design, dependency inversion, contract preservation, and evidence-based implementation. Use when modifying an existing codebase, adding a feature, fixing a bug, refactoring, selecting a library, reviewing architecture, or changing services, parsers, model loaders, clients, configuration, or infrastructure.
+description: Apply reuse-first architecture, SOLID design, dependency inversion, contract preservation, and evidence-based implementation to every programming change. Use before writing or editing code, tests, scripts, configuration, or infrastructure — including features, bug fixes, refactors, library or dependency selection, and changes to services, parsers, model loaders, clients, configuration, or infrastructure.
 ---
 
 # Reuse-first architecture
@@ -8,6 +8,23 @@ description: Apply reuse-first architecture, SOLID design, dependency inversion,
 Workflow for modifying an existing codebase without reinventing capabilities.
 Follow the steps in order. Do not skip the search, design, or verification
 phases. The final report must contain evidence, not assurances.
+
+MANDATORY PRE-CODING GATE
+
+Before creating, editing, or deleting any code, test code, script,
+configuration code, or infrastructure definition:
+
+1. Read this skill and the repository agent instructions.
+2. Search for existing components, interfaces, factories, helpers,
+   libraries, configuration, and tests that may already provide the behavior.
+3. State a concise decision: reuse, adapt, extend, or build, naming the
+   component inspected and the reason.
+4. Identify the affected public contract and dependency direction.
+5. Only then write code.
+
+For a trivial change, perform the gate briefly. "No architecture impact"
+is acceptable, but skipping the gate is not. Read-only inspection may happen
+before the gate; code edits may not.
 
 ## 1. Establish constraints
 

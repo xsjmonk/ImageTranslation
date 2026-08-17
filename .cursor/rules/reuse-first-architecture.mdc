@@ -1,23 +1,21 @@
 ---
-description: Read and follow the canonical reuse-first architecture skill for repository changes.
+description: Read and follow the canonical reuse-first architecture skill and its mandatory pre-coding gate before every code edit.
 globs: ["**/*"]
 alwaysApply: true
 ---
 
-# Reuse-first architecture
+# Reuse-first architecture — mandatory pre-coding gate
 
-Before adding a feature, fixing a bug, refactoring, or changing services,
-parsers, model loaders, clients, configuration, or infrastructure, read the
-canonical skill and follow it:
+Before writing or editing any code, tests, scripts, configuration, or
+infrastructure definition, read the canonical skill and complete its gate:
 
 > Read `.agent-skills/reuse-first-architecture/SKILL.md` and its references
 > before implementation.
 
-Key obligations:
+The gate applies to every programming edit, even small or trivial ones:
 
-- Search before building: reuse, adapt, or extend existing components
-  (models, parsers, config, cache, HTTP, retry/timeout logic) before
-  writing new code; name the component and its contract when reusing.
+- Search before building: reuse, adapt, extend, or build — naming the
+  component inspected and the reason.
 - Apply SOLID and dependency inversion: transport stays thin,
   `src/image_translation` never imports FastAPI/server code, model and
   tokenizer resolution stays centralized.
