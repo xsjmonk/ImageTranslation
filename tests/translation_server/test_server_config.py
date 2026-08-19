@@ -38,6 +38,58 @@ class TestLoadServerConfig:
         assert cfg.translation.model_name == "facebook/m2m100_418M"
         assert cfg.structured.preserve_patterns == ("^[A-Z]{2,}/\\d{4}$",)
 
+    def test_quality_and_generation_policy_load(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {
+                "quality": {"unknown_token_policy": "reject"},
+                "translation": {
+                    "generation": {
+                        "short_text_max_new_tokens": 32,
+                        "retry_num_beams": 1,
+                    }
+                },
+            },
+        )
+        cfg = load_server_config(cfg_path)
+        assert cfg.translation.quality.unknown_token_policy == "reject"
+        assert cfg.translation.generation.short_text_max_new_tokens == 32
+        assert cfg.translation.generation.retry_num_beams == 1
+
+    def test_invalid_unknown_token_policy_rejected(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {"quality": {"unknown_token_policy": "replace"}},
+        )
+        with pytest.raises(ValueError, match="unknown_token_policy"):
+            load_server_config(cfg_path)
+
+    def test_glossary_path_resolves_from_config_directory(self, tmp_path):
+        glossary = tmp_path / "terms.tsv"
+        glossary.write_text(
+            "source\ttarget\texact\n蔡司\tZeiss\ttrue\n",
+            encoding="utf-8",
+        )
+        cfg_path = _write_config(
+            tmp_path,
+            {
+                "quality": {
+                    "glossary_file": "terms.tsv",
+                    "glossary_required": True,
+                }
+            },
+        )
+        cfg = load_server_config(cfg_path)
+        assert Path(cfg.translation.quality.glossary_file) == glossary.resolve()
+
+    def test_legacy_json_glossary_rejected(self, tmp_path):
+        cfg_path = _write_config(
+            tmp_path,
+            {"structured": {"glossary": []}},
+        )
+        with pytest.raises(ValueError, match="quality.glossary_file"):
+            load_server_config(cfg_path)
+
     def test_missing_explicit_config_fails(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="not found"):
             load_server_config(tmp_path / "nope.json")

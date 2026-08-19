@@ -106,7 +106,7 @@ def _record_io(phrase: str, output: str, info) -> None:
     print(f"    OUTPUT: {output}")
     print(
         f"    RECORD: model={info.model_name} device={info.device} "
-        f"precision={info.precision} num_beams=4 max_new_tokens=256 "
+        f"precision={info.precision} num_beams=4 adaptive_max_new_tokens "
         f"no_repeat_ngram_size=unset forced_bos_token_id=target_lang"
     )
 
@@ -119,7 +119,7 @@ class TestDirectModuleQuality:
     def test_chinese_phrases_fp32_beams4(self):
         from image_translation.translation import TranslationConfig, create_translator
 
-        # Defaults: precision='auto' -> FP32, num_beams=4, no_repeat unset
+        # Defaults: precision='auto' -> FP32, num_beams=4, adaptive budget.
         cfg = TranslationConfig()
         assert cfg.precision == "auto"
         assert cfg.generation.num_beams == 4
@@ -219,9 +219,41 @@ class TestApiParity:
                     f"source: {phrase!r}\n"
                     f"direct: {direct_out!r}\n"
                     f"api:    {api_out!r}\n"
-                    f"decoding: FP32 num_beams=4 max_new_tokens=256 "
+                    f"decoding: FP32 num_beams=4 adaptive budget "
                     f"no_repeat_ngram_size=unset"
                 )
         finally:
             server.should_exit = True
             thread.join(timeout=15)
+
+
+class TestFailingProductTitleQuality:
+    def test_eyeglass_title_glossary_and_no_repetition(self):
+        from image_translation.translation import (
+            GlossaryEntry,
+            StructuredConfig,
+            StructuredTranslator,
+            TranslationConfig,
+            create_translator,
+        )
+
+        source = "德国蔡司纯钛眼镜近视男可配度数防蓝光商务超轻镜框专业"
+        config = TranslationConfig()
+        translator = create_translator(config)
+        structured = StructuredTranslator(
+            translator,
+            StructuredConfig(
+                glossary=(
+                    GlossaryEntry("蔡司", "Zeiss"),
+                    GlossaryEntry("纯钛", "pure titanium"),
+                    GlossaryEntry("防蓝光", "blue-light protection"),
+                )
+            ),
+            config,
+        )
+        output = structured.translate(f"<p>{source}</p>").translated_html
+        lowered = output.casefold()
+        assert "zeiss" in lowered
+        assert "pure titanium" in lowered
+        assert "blue-light protection" in lowered
+        assert "bright bright bright bright" not in lowered

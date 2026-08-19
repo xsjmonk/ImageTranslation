@@ -6,6 +6,7 @@ from .classifier import classify_regions
 from .config import (
     TranslationConfig,
     GenerationConfig,
+    QualityConfig,
     StructuredConfig,
     GlossaryEntry,
 )
@@ -16,8 +17,10 @@ from .exceptions import (
     TranslationError,
     TranslationInputError,
     TranslationModelLoadError,
+    TranslationQualityError,
 )
 from .factory import create_translator
+from .glossary import GlossaryTranslator, load_glossary_file
 from .html_document import HTMLDocument
 from .html_protection import ProtectionMap
 from .language_segments import classify, LanguageKind, protect_identifiers
@@ -38,6 +41,7 @@ __all__ = [
     # Config
     "TranslationConfig",
     "GenerationConfig",
+    "QualityConfig",
     "StructuredConfig",
     "GlossaryEntry",
     # Models
@@ -46,6 +50,8 @@ __all__ = [
     "TranslationRuntimeInfo",
     # Factory
     "create_translator",
+    "GlossaryTranslator",
+    "load_glossary_file",
     # Implementations
     "M2M100Translator",
     "NoopTranslator",
@@ -55,6 +61,7 @@ __all__ = [
     "TranslationDeviceError",
     "TranslationInputError",
     "TranslationModelLoadError",
+    "TranslationQualityError",
     "StructuredTranslationError",
     # Utilities
     "classify_regions",

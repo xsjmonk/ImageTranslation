@@ -147,6 +147,38 @@ The first launch downloads the model (~1.7 GB). Subsequent starts are fast.
 - `warmup_on_start: true` (default) — model loads before the API becomes ready; startup fails if the model cannot load.
 - `warmup_on_start: false` — model loads lazily on the first `/translate` request; `/health` reports `"status": "starting", "ready": false` until then.
 
+### Translation quality policy
+
+The shared translator performs tokenizer preflight with the exact loaded
+tokenizer (`truncation=False`). Unknown-token counts and model/generation
+metadata are logged without source text. Configure the policy at the
+top-level `quality` section:
+
+```json
+"quality": {
+  "unknown_token_policy": "warn",
+  "glossary_file": "src/image_translation/config/glossary.tsv",
+  "glossary_required": true
+}
+```
+
+`allow` continues silently, `warn` (the backward-compatible default) emits a
+diagnostic, and `reject` returns a typed quality error. Generation derives a
+target budget from measured source tokens, caps compact inputs at
+`short_text_max_new_tokens`, and retries once with the configured retry policy
+when repeated or unbounded output is detected. A second failure is discarded
+and reported as a quality error; repeated text is never returned as success.
+
+Plain and HTML translation share one glossary loaded once at server startup
+from `src/image_translation/config/glossary.tsv`. The file is UTF-8
+tab-delimited, supports a BOM, and has the header `source<TAB>target<TAB>exact`.
+Malformed, duplicate, overlapping, or invalid rows fail configuration loading.
+When `glossary_required` is false, a missing file produces a warning and an
+empty glossary.
+
+The legacy `structured.glossary` JSON array is rejected; migrate it to the
+TSV file instead.
+
 ### Model cache location and offline mode
 
 The model download location is configurable under `translation`:
@@ -196,7 +228,9 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8091/translate' -Method Post -ContentTy
 
 Response: `{"translation": "Increased waterproof."}`
 
-Errors are JSON envelopes (`{"error": "...", "correlation_id": "..."}`): invalid input → 400, translator/model unavailable → 503, unexpected failure → 500.
+Errors are JSON envelopes with `error`, `correlation_id`, and stable `code`
+fields: invalid input → 400, quality failure → 422, translator/model
+unavailable → 503, unexpected failure → 500.
 
 ### HTML-aware translation (`format: "html"`)
 
@@ -234,10 +268,6 @@ Structured configuration (`structured` section in `translation-server.config.jso
   "max_segment_tokens": 450,
   "max_target_tokens": 400,
   "context_window_tokens": 0,
-  "glossary": [
-    {"source": "充电器", "target": "Charger", "exact": true},
-    {"source": "防水面料", "target": "Waterproof Fabric", "exact": true}
-  ],
   "preserve_patterns": ["^[A-Z]{2,}/\\d{4}$"],
   "translatable_attributes": [],
   "excluded_tags": ["script", "style", "code", "pre"],
@@ -261,7 +291,7 @@ Notes:
   - model-emitted `&nbsp;`-like text is escaped to `&amp;nbsp;` on output (text, never an entity).
   - **Normalization boundary** (documented): malformed input (implied/stray tags) falls back to the parser's canonical tag form; attribute values of *translated* attributes are re-serialized canonically (translatable attributes default to none); script/style content is always byte-identical.
 - **`preserve_patterns`**: configurable regex list for project-specific model formats/product codes (e.g. `["^[A-Z]{2,}/\\d{4}$"]`). Matches in non-Chinese spans become `model_number_protected` runs — preserved exactly, never rewritten by the model. Applied on top of the built-in identifier rules (URLs, emails, codes, measurements, versions); invalid patterns raise a configuration error.
-- **Terminology memory (glossary)**: a chapter-scoped terminology map. Configured entries (`{"source": "充电器", "target": "Charger", "exact": true}`) are replaced with protected placeholders BEFORE inference and restored to the exact target term afterwards — the same term maps to the same target in EVERY segment (consistent by construction; the model can never paraphrase it). `exact: true` never matches inside a latin word (`cat` ≠ `catalog`); CJK ideograph neighbors are accepted (Chinese has no spaces). Protected identifiers (URLs, codes) always win over glossary terms. After reconstruction, a consistency check counts target occurrences **in the translated nodes only** (never fooled by target-like strings in excluded or untouched English blocks) and fails closed on any mismatch.
+- **Terminology memory (glossary)**: the startup-loaded TSV glossary is injected into the structured orchestration. Entries are replaced with protected placeholders BEFORE inference and restored to exact target terms afterwards — the same term maps to the same target in EVERY segment. `exact: true` never matches inside a latin word (`cat` ≠ `catalog`); CJK ideograph neighbors are accepted. Protected identifiers (URLs, codes) always win over glossary terms.
 - Repeated Chinese terms (CJK bigrams/trigrams, ≥3 occurrences) are collected and reported in the metrics for review; they are informational — only configured glossary entries drive replacement.
 - `context_window_tokens` is **explicitly unsupported**: non-zero values raise a configuration error. M2M100's `generate()` has no reliable context API; segment adjacency ids are diagnostics only and are never sent to the model.
 - Machine-readable metrics: the structured result exposes `to_dict()` (segment count, source tokens, target budgets, protected-run count, terminology occurrences with segment ids, repeated terms, elapsed time, retry/fallback counts, validation status) — emitted as JSON by the GPU quality gate.

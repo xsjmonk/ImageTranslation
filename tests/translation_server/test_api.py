@@ -175,6 +175,17 @@ class TestTranslate:
         data = resp.json()
         assert "translation" in data
 
+    def test_plain_default_uses_startup_glossary(self, client):
+        resp = client.post(
+            "/translate",
+            json={"text": "德国蔡司纯钛眼镜防蓝光"},
+        )
+        assert resp.status_code == 200
+        output = resp.json()["translation"]
+        assert output.count("Zeiss") == 1
+        assert "pure titanium" in output
+        assert "blue-light protection" in output
+
     def test_response_contains_exactly_translation(self, client):
         resp = client.post("/translate", json={"text": "测试"})
         assert resp.status_code == 200
@@ -188,6 +199,7 @@ class TestTranslate:
     def test_missing_text_422(self, client):
         resp = client.post("/translate", json={})
         assert resp.status_code == 422
+        assert resp.json()["code"] == "invalid_request"
 
     def test_too_long_400(self):
         """Length limit comes from configured translator max, not the API model."""

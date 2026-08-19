@@ -19,7 +19,7 @@ from typing import Optional
 
 from image_translation.translation.config import (
     GenerationConfig,
-    GlossaryEntry,
+    QualityConfig,
     StructuredConfig,
     TranslationConfig,
 )
@@ -141,6 +141,21 @@ def _resolve_cache_dir(raw: object, config_file: Optional[Path]) -> Optional[str
     return str(path.resolve())
 
 
+def _resolve_glossary_file(raw: object, config_file: Optional[Path]) -> str:
+    """Resolve the glossary once at the selected configuration boundary."""
+    value = str(raw).strip() if raw is not None else ""
+    if not value:
+        return str(
+            (_find_repo_root() / "src" / "image_translation" / "config"
+             / "glossary.tsv").resolve()
+        )
+    path = Path(os.path.expandvars(value)).expanduser()
+    if not path.is_absolute():
+        base = config_file.parent if config_file is not None else _find_repo_root()
+        path = base / path
+    return str(path.resolve())
+
+
 def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
     """Load server configuration.
 
@@ -178,22 +193,17 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
     )
 
     structured_raw = raw.get("structured", {})
-    glossary_raw = structured_raw.get("glossary", ()) or ()
-    glossary = tuple(
-        GlossaryEntry(
-            source=entry["source"],
-            target=entry["target"],
-            exact=bool(entry.get("exact", True)),
+    if "glossary" in structured_raw:
+        raise ValueError(
+            "structured.glossary is no longer supported; migrate entries to "
+            "quality.glossary_file (UTF-8 TSV)"
         )
-        for entry in glossary_raw
-    )
     structured = StructuredConfig(
         enabled=structured_raw.get("enabled", True),
         max_chapter_characters=structured_raw.get("max_chapter_characters", 100_000),
         max_segment_tokens=structured_raw.get("max_segment_tokens", 450),
         max_target_tokens=structured_raw.get("max_target_tokens", 400),
         context_window_tokens=structured_raw.get("context_window_tokens", 0),
-        glossary=glossary,
         preserve_patterns=tuple(
             structured_raw.get("preserve_patterns", ())
         ),
@@ -208,6 +218,7 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         ),
         max_total_seconds=structured_raw.get("max_total_seconds", 600.0),
         max_retries_per_segment=structured_raw.get("max_retries_per_segment", 1),
+        batch_size=structured_raw.get("batch_size", 4),
         concurrency=structured_raw.get("concurrency", 1),
     )
 
@@ -215,9 +226,32 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
     gen_raw = trans_raw.get("generation", {})
     generation = GenerationConfig(
         max_new_tokens=gen_raw.get("max_new_tokens", 256),
+        min_new_tokens=gen_raw.get("min_new_tokens", 1),
+        target_token_multiplier=gen_raw.get("target_token_multiplier", 2.5),
+        short_text_max_new_tokens=gen_raw.get(
+            "short_text_max_new_tokens", 64
+        ),
         num_beams=gen_raw.get("num_beams", 4),
         length_penalty=gen_raw.get("length_penalty", 1.0),
         early_stopping=gen_raw.get("early_stopping", True),
+        repetition_check=gen_raw.get("repetition_check", True),
+        max_repeated_token_run=gen_raw.get("max_repeated_token_run", 3),
+        max_repeated_ngram_ratio=gen_raw.get(
+            "max_repeated_ngram_ratio", 0.35
+        ),
+        retry_on_degenerate_output=gen_raw.get(
+            "retry_on_degenerate_output", True
+        ),
+        retry_num_beams=gen_raw.get("retry_num_beams", 1),
+        retry_max_new_tokens=gen_raw.get("retry_max_new_tokens", 64),
+    )
+    quality_raw = raw.get("quality", {})
+    quality = QualityConfig(
+        unknown_token_policy=quality_raw.get("unknown_token_policy", "warn"),
+        glossary_file=_resolve_glossary_file(
+            quality_raw.get("glossary_file"), resolved
+        ),
+        glossary_required=quality_raw.get("glossary_required", True),
     )
 
     translation = TranslationConfig(
@@ -232,6 +266,7 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         batch_size=trans_raw.get("batch_size", 8),
         max_input_characters=trans_raw.get("max_input_characters", 4000),
         generation=generation,
+        quality=quality,
         model_cache_dir=_resolve_cache_dir(trans_raw.get("model_cache_dir"), resolved),
         allow_model_download=trans_raw.get("allow_model_download", True),
         local_files_only=trans_raw.get("local_files_only", False),

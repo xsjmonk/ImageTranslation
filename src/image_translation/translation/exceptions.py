@@ -11,6 +11,10 @@ class TranslationInputError(TranslationError):
     """Invalid translation input (empty, whitespace, too long, wrong type)."""
 
 
+class TranslationQualityError(TranslationError):
+    """Translation failed a configured input/output quality safeguard."""
+
+
 class TranslationConfigurationError(TranslationError):
     """Invalid translation/server configuration."""
 

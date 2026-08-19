@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import List, Optional, Sequence
 
@@ -14,6 +15,7 @@ from .exceptions import (
     TranslationError,
     TranslationInputError,
     TranslationModelLoadError,
+    TranslationQualityError,
 )
 from .models import ResolvedModel, TranslationResult, TranslationRuntimeInfo
 from .text_utils import preprocess
@@ -40,6 +42,7 @@ class M2M100Translator(Translator):
         self._cache_status: str = ""
         self._cache_dir: str = ""
         self._resolved: Optional[ResolvedModel] = None
+        self._last_quality_diagnostics: dict = {}
         # One computed effective-offline flag for resolution, tokenizer,
         # model, and HTML token measurement.
         self._offline = config.local_files_only or not config.allow_model_download
@@ -79,6 +82,11 @@ class M2M100Translator(Translator):
             local_files_only=self._config.local_files_only,
             offline=self._offline,
         )
+
+    @property
+    def quality_diagnostics(self) -> dict:
+        """Return the latest safe, non-text quality diagnostics."""
+        return dict(self._last_quality_diagnostics)
 
     def translate_text(
         self, text: str, source_lang: str = "zh", target_lang: str = "en"
@@ -440,6 +448,7 @@ class M2M100Translator(Translator):
         source_lang: str,
         target_lang: str,
         max_new_tokens: int | None = None,
+        _retry: bool = False,
     ) -> List[TranslationResult]:
         """Translate a chunk of texts in one GPU batch.
 
@@ -452,9 +461,6 @@ class M2M100Translator(Translator):
         tokenizer = self._tokenizer
         model = self._model
         device_str = self._device_str
-        gen_cfg = self._config.generation
-        target_budget = max_new_tokens if max_new_tokens is not None else gen_cfg.max_new_tokens
-
         target_lang_id = tokenizer.get_lang_id(target_lang)
 
         with self._lock, torch.inference_mode():
@@ -468,11 +474,17 @@ class M2M100Translator(Translator):
                 truncation=False,
             )
 
+            actual_tokens = encoded["input_ids"].shape[1]
+            gen_cfg = self._config.generation
+            target_budget = gen_cfg.target_budget(
+                actual_tokens, explicit=max_new_tokens
+            )
+            num_beams = gen_cfg.retry_num_beams if _retry else gen_cfg.num_beams
+
             # --- Explicit over-budget rejection: no silent truncation ---
             # The structured path validates budgets before generation; this
             # is the final hard guard (model context window minus target
             # budget). Plain text beyond the model window fails explicitly.
-            actual_tokens = encoded["input_ids"].shape[1]
             ceiling = model.config.max_position_embeddings - target_budget - 8
             if actual_tokens > ceiling:
                 raise TranslationInputError(
@@ -481,6 +493,55 @@ class M2M100Translator(Translator):
                     f"(max_position_embeddings={model.config.max_position_embeddings}, "
                     f"target_budget={target_budget}); text was NOT truncated"
                 )
+
+            unknown_count, unknown_tokens = self._unknown_token_diagnostics(
+                encoded["input_ids"], tokenizer
+            )
+            self._last_quality_diagnostics = {
+                "source_token_count": actual_tokens,
+                "unknown_token_count": unknown_count,
+                "unknown_tokens": unknown_tokens,
+                "source_language": source_lang,
+                "target_language": target_lang,
+                "model_name": self._config.model_name,
+                "model_revision": self._config.model_revision,
+                "device": self._device_str,
+                "precision": self._precision_str,
+                "generation": {
+                    "max_new_tokens": target_budget,
+                    "num_beams": num_beams,
+                    "length_penalty": gen_cfg.length_penalty,
+                    "early_stopping": gen_cfg.early_stopping,
+                },
+            }
+            if unknown_count:
+                message = (
+                    "tokenizer produced %d unknown token(s) for "
+                    "%d source token(s) (model=%s revision=%s source=%s "
+                    "target=%s)"
+                )
+                if self._config.quality.unknown_token_policy == "reject":
+                    raise TranslationQualityError(
+                        message
+                        % (
+                            unknown_count,
+                            actual_tokens,
+                            self._config.model_name,
+                            self._config.model_revision,
+                            source_lang,
+                            target_lang,
+                        )
+                    )
+                if self._config.quality.unknown_token_policy == "warn":
+                    logger.warning(
+                        "[QUALITY] " + message,
+                        unknown_count,
+                        actual_tokens,
+                        self._config.model_name,
+                        self._config.model_revision,
+                        source_lang,
+                        target_lang,
+                    )
 
             # --- Diagnostics (debug): tokenizer output before moving ---
             logger.debug(
@@ -511,20 +572,32 @@ class M2M100Translator(Translator):
                 encoded["input_ids"].dtype,
                 device_str,
                 self._precision_str,
-                gen_cfg.num_beams,
+                num_beams,
                 gen_cfg.max_new_tokens,
                 gen_cfg.length_penalty,
                 gen_cfg.early_stopping,
             )
 
-            generated = model.generate(
+            generation_kwargs = {
                 **encoded,
-                forced_bos_token_id=target_lang_id,
-                max_new_tokens=target_budget,
-                num_beams=gen_cfg.num_beams,
-                length_penalty=gen_cfg.length_penalty,
-                early_stopping=gen_cfg.early_stopping if gen_cfg.num_beams > 1 else False,
-            )
+                "forced_bos_token_id": target_lang_id,
+                "max_new_tokens": target_budget,
+                "num_beams": num_beams,
+                "length_penalty": gen_cfg.length_penalty,
+                "early_stopping": (
+                    gen_cfg.early_stopping if num_beams > 1 else False
+                ),
+            }
+            # M2M100's generation config may carry max_length=200. Clear that
+            # legacy limit so the adaptive max_new_tokens policy is the sole
+            # length authority; passing a generation_config alongside explicit
+            # generation arguments is deprecated by Transformers.
+            model_generation_config = getattr(model, "generation_config", None)
+            if model_generation_config is not None and getattr(
+                model_generation_config, "max_length", None
+            ) is not None:
+                model_generation_config.max_length = None
+            generated = model.generate(**generation_kwargs)
 
             # --- Diagnostics (debug): raw generated token IDs before decode ---
             logger.debug(
@@ -536,12 +609,52 @@ class M2M100Translator(Translator):
                 generated, skip_special_tokens=True
             )
 
-        # Decode cardinality invariant: batch_decode must return exactly one
-        # output per input — never silently zip away a mismatch.
+        # Validate cardinality before any per-item quality inspection.
         if len(decoded) != len(texts):
             raise TranslationError(
                 f"model returned {len(decoded)} decoded outputs for "
                 f"{len(texts)} inputs"
+            )
+
+        degenerate = [
+            index
+            for index, text in enumerate(decoded)
+            if isinstance(text, str)
+            and gen_cfg.repetition_check
+            and self.detect_degenerate_output(
+                text,
+                source_tokens=actual_tokens,
+                generated_length=generated[index].shape[0],
+                input_length=encoded["input_ids"].shape[1],
+                target_budget=target_budget,
+                tokenizer=tokenizer,
+                max_repeated_token_run=gen_cfg.max_repeated_token_run,
+                max_repeated_ngram_ratio=gen_cfg.max_repeated_ngram_ratio,
+            )
+        ]
+        if degenerate:
+            logger.warning(
+                "[QUALITY] degenerate output detected for item(s) %s "
+                "(source_tokens=%d target_budget=%d retry=%s)",
+                degenerate, actual_tokens, target_budget,
+                gen_cfg.retry_on_degenerate_output and not _retry,
+            )
+            if gen_cfg.retry_on_degenerate_output and not _retry:
+                retry_budget = min(
+                    target_budget,
+                    gen_cfg.retry_max_new_tokens,
+                )
+                return self._translate_impl(
+                    texts,
+                    source_lang,
+                    target_lang,
+                    max_new_tokens=retry_budget,
+                    _retry=True,
+                )
+            raise TranslationQualityError(
+                "translation output failed degeneration checks after "
+                "the configured retry; repeated or unbounded output was "
+                "discarded"
             )
 
         results: List[TranslationResult] = []
@@ -566,3 +679,71 @@ class M2M100Translator(Translator):
                 )
             )
         return results
+
+    @staticmethod
+    def _unknown_token_diagnostics(encoded_ids, tokenizer) -> tuple[int, list[str]]:
+        """Count tokenizer unknowns without exposing source text in logs."""
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+        if unk_id is None:
+            return 0, []
+        flat_ids = encoded_ids.detach().cpu().reshape(-1).tolist()
+        count = sum(1 for token_id in flat_ids if token_id == unk_id)
+        if not count:
+            return 0, []
+        labels: list[str] = []
+        convert = getattr(tokenizer, "convert_ids_to_tokens", None)
+        if convert is not None:
+            try:
+                labels = [
+                    str(token)
+                    for token in convert([token_id for token_id in flat_ids
+                                          if token_id == unk_id])
+                ]
+            except Exception:
+                labels = []
+        return count, labels[:16]
+
+    @staticmethod
+    def detect_degenerate_output(
+        text: str,
+        source_tokens: int,
+        generated_length: int | None = None,
+        input_length: int = 0,
+        target_budget: int = 0,
+        tokenizer=None,
+        max_repeated_token_run: int = 3,
+        max_repeated_ngram_ratio: float = 0.35,
+    ) -> bool:
+        """Detect autoregressive repetition before output is exposed."""
+        words = re.findall(r"\w+(?:[-']\w+)*", text.casefold(), flags=re.UNICODE)
+        if not words:
+            return not text.strip()
+        run = 1
+        max_run = 1
+        for previous, current in zip(words, words[1:]):
+            run = run + 1 if previous == current else 1
+            max_run = max(max_run, run)
+        if max_run > max_repeated_token_run:
+            return True
+
+        if len(words) >= 4:
+            repeated = sum(
+                1
+                for i in range(len(words) - 3)
+                if words[i:i + 2] == words[i + 2:i + 4]
+            )
+            if repeated / max(1, len(words) - 3) > max_repeated_ngram_ratio:
+                return True
+
+        if (
+            generated_length is not None
+            and target_budget > 0
+            and generated_length >= input_length + target_budget
+        ):
+            return True
+
+        # Compact keyword titles should not expand by an extreme factor even
+        # when the model stops naturally.
+        if source_tokens <= 32 and len(words) > max(32, source_tokens * 8):
+            return True
+        return False

@@ -21,8 +21,10 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -32,6 +34,7 @@ from image_translation.translation.exceptions import (
     TranslationError,
     TranslationInputError,
     TranslationModelLoadError,
+    TranslationQualityError,
 )
 from image_translation.translation.structured_translation import StructuredTranslator
 
@@ -173,7 +176,11 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
                     runtime, translator, req, source_lang, target_lang, correlation_id
                 )
             return await _translate_plain(
-                translator, req, source_lang, target_lang, correlation_id
+                runtime.quality_translator,
+                req,
+                source_lang,
+                target_lang,
+                correlation_id,
             )
 
     # ------------------------------------------------------------------
@@ -188,6 +195,19 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
             else ErrorResponse(error=str(exc.detail)).model_dump(),
         )
 
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
+        return JSONResponse(
+            status_code=422,
+            content=ErrorResponse(
+                error="Invalid translation request",
+                correlation_id=uuid.uuid4().hex[:12],
+                code="invalid_request",
+            ).model_dump(),
+        )
+
     return app
 
 
@@ -195,10 +215,19 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _http(code: int, message: str, correlation_id: str = "") -> HTTPException:
+def _http(
+    code: int,
+    message: str,
+    correlation_id: str = "",
+    error_code: str = "translation_error",
+) -> HTTPException:
     return HTTPException(
         status_code=code,
-        detail=ErrorResponse(error=message, correlation_id=correlation_id).model_dump(),
+        detail=ErrorResponse(
+            error=message,
+            correlation_id=correlation_id,
+            code=error_code,
+        ).model_dump(),
     )
 
 
@@ -210,13 +239,17 @@ async def _translate_plain(
             translator.translate_text, req.text, source_lang, target_lang
         )
     except TranslationInputError as e:
-        raise _http(400, str(e), correlation_id) from e
+        raise _http(400, str(e), correlation_id, "invalid_input") from e
+    except TranslationQualityError as e:
+        raise _http(422, str(e), correlation_id, "translation_quality") from e
     except (TranslationDeviceError, TranslationModelLoadError) as e:
         logger.exception("[%s] translator unavailable during request", correlation_id)
-        raise _http(503, "Translation service unavailable", correlation_id) from e
+        raise _http(503, "Translation service unavailable", correlation_id,
+                    "model_unavailable") from e
     except Exception as e:
         logger.exception("[%s] unexpected plain translation failure", correlation_id)
-        raise _http(500, "Translation failed", correlation_id) from e
+        raise _http(500, "Translation failed", correlation_id,
+                    "translation_failed") from e
     return TranslateResponse(translation=result.translated_text)
 
 
@@ -224,9 +257,14 @@ async def _translate_html(
     runtime, translator, req: TranslateRequest, source_lang: str, target_lang: str,
     correlation_id: str,
 ) -> TranslateResponse:
-    cfg = runtime.config.structured
+    cfg = replace(runtime.config.structured, glossary=runtime.glossary)
     if not cfg.enabled:
-        raise _http(400, "HTML translation is disabled on this server", correlation_id)
+        raise _http(
+            400,
+            "HTML translation is disabled on this server",
+            correlation_id,
+            "invalid_format",
+        )
 
     st = StructuredTranslator(
         translator,
@@ -242,15 +280,19 @@ async def _translate_html(
         message = str(e)
         code = 422 if ("max_chapter_characters" in message or "must be a string" in message) else 500
         logger.warning("[%s] structured translation failed: %s", correlation_id, message)
-        raise _http(code, message, correlation_id) from e
+        raise _http(code, message, correlation_id, "structured_translation") from e
     except (TranslationInputError, ValueError) as e:
-        raise _http(400, str(e), correlation_id) from e
+        raise _http(400, str(e), correlation_id, "invalid_input") from e
+    except TranslationQualityError as e:
+        raise _http(422, str(e), correlation_id, "translation_quality") from e
     except (TranslationDeviceError, TranslationModelLoadError) as e:
         logger.exception("[%s] translator unavailable during structured request", correlation_id)
-        raise _http(503, "Translation service unavailable", correlation_id) from e
+        raise _http(503, "Translation service unavailable", correlation_id,
+                    "model_unavailable") from e
     except Exception as e:
         logger.exception("[%s] unexpected structured translation failure", correlation_id)
-        raise _http(500, "Translation failed", correlation_id) from e
+        raise _http(500, "Translation failed", correlation_id,
+                    "translation_failed") from e
 
     logger.info(
         "[%s] html ok segments=%d source_tokens=%d retries=%d fallbacks=%d %.2fs",

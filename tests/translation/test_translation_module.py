@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from image_translation.translation.config import TranslationConfig, GenerationConfig
+from image_translation.translation.config import (
+    GenerationConfig,
+    QualityConfig,
+    TranslationConfig,
+)
 from image_translation.translation.exceptions import (
     TranslationDeviceError,
     TranslationInputError,
@@ -131,6 +135,22 @@ class TestTranslationConfig:
     def test_batch_size_positive(self):
         with pytest.raises(ValueError, match="batch_size"):
             TranslationConfig(batch_size=0)
+
+    def test_quality_policy_defaults_and_validation(self):
+        assert QualityConfig().unknown_token_policy == "warn"
+        with pytest.raises(ValueError, match="unknown_token_policy"):
+            QualityConfig(unknown_token_policy="fail")
+
+    def test_adaptive_generation_budgets(self):
+        gen = GenerationConfig()
+        assert gen.target_budget(3) == 8
+        assert gen.target_budget(20) == 50
+        assert gen.target_budget(40) == 100
+        assert gen.target_budget(3, explicit=32) == 32
+
+    def test_invalid_generation_policy(self):
+        with pytest.raises(ValueError, match="max_repeated_token_run"):
+            GenerationConfig(max_repeated_token_run=1)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +352,7 @@ class TestActiveGenerationPath:
         # forced_bos_token_id resolved from the REQUEST target language
         assert kw["forced_bos_token_id"] == 128014  # fr
         assert kw["num_beams"] == 4
-        assert kw["max_new_tokens"] == 256  # GenerationConfig default
+        assert kw["max_new_tokens"] == 8  # ceil(3 source tokens * 2.5)
         assert "input_ids" in kw and "attention_mask" in kw
 
     def test_generate_has_no_no_repeat_ngram_size(self):
@@ -365,6 +385,41 @@ class TestActiveGenerationPath:
 
         assert translator._resolve_precision(Model(), "cpu") == "float16"
         assert calls == ["half"]
+
+
+class TestGenerationQuality:
+    def test_repeated_word_and_ngram_detection(self):
+        from image_translation.translation.m2m100_translator import (
+            M2M100Translator,
+        )
+
+        assert M2M100Translator.detect_degenerate_output(
+            "Bright Bright Bright Bright", source_tokens=4
+        )
+        assert M2M100Translator.detect_degenerate_output(
+            "alpha beta alpha beta alpha beta", source_tokens=4
+        )
+        assert not M2M100Translator.detect_degenerate_output(
+            "A compact translation with useful meaning", source_tokens=5
+        )
+
+    def test_unknown_token_count_is_safe(self):
+        import torch
+        from image_translation.translation.m2m100_translator import (
+            M2M100Translator,
+        )
+
+        class Tokenizer:
+            unk_token_id = 99
+
+            def convert_ids_to_tokens(self, ids):
+                return ["<unk>" for _ in ids]
+
+        count, tokens = M2M100Translator._unknown_token_diagnostics(
+            torch.tensor([[99, 1, 99]]), Tokenizer()
+        )
+        assert count == 2
+        assert tokens == ["<unk>", "<unk>"]
 
 
 # ---------------------------------------------------------------------------

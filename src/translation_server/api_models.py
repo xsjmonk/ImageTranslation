@@ -69,3 +69,4 @@ class ErrorResponse(BaseModel):
     """Standard safe JSON error envelope (no internals/tracebacks)."""
     error: str
     correlation_id: str = ""
+    code: str = "translation_error"

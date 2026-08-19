@@ -4,16 +4,89 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from math import ceil
 from typing import Optional
 
 
 @dataclass
 class GenerationConfig:
-    """M2M100 generation parameter defaults."""
+    """M2M100 generation policy, including quality safeguards."""
     max_new_tokens: int = 256
+    min_new_tokens: int = 1
+    target_token_multiplier: float = 2.5
+    short_text_max_new_tokens: int = 64
     num_beams: int = 4
     length_penalty: float = 1.0
     early_stopping: bool = True
+    repetition_check: bool = True
+    max_repeated_token_run: int = 3
+    max_repeated_ngram_ratio: float = 0.35
+    retry_on_degenerate_output: bool = True
+    retry_num_beams: int = 1
+    retry_max_new_tokens: int = 64
+
+    def __post_init__(self) -> None:
+        if self.max_new_tokens < 1:
+            raise ValueError("generation.max_new_tokens must be >= 1")
+        if self.min_new_tokens < 1:
+            raise ValueError("generation.min_new_tokens must be >= 1")
+        if self.min_new_tokens > self.max_new_tokens:
+            raise ValueError(
+                "generation.min_new_tokens must not exceed max_new_tokens"
+            )
+        if self.target_token_multiplier <= 0:
+            raise ValueError("generation.target_token_multiplier must be > 0")
+        if self.short_text_max_new_tokens < self.min_new_tokens:
+            raise ValueError(
+                "generation.short_text_max_new_tokens must be >= min_new_tokens"
+            )
+        if self.num_beams < 1 or self.retry_num_beams < 1:
+            raise ValueError("generation beam counts must be >= 1")
+        if self.max_repeated_token_run < 2:
+            raise ValueError("generation.max_repeated_token_run must be >= 2")
+        if not 0 <= self.max_repeated_ngram_ratio <= 1:
+            raise ValueError(
+                "generation.max_repeated_ngram_ratio must be between 0 and 1"
+            )
+        if self.retry_max_new_tokens < self.min_new_tokens:
+            raise ValueError(
+                "generation.retry_max_new_tokens must be >= min_new_tokens"
+            )
+
+    def target_budget(self, source_tokens: int, explicit: int | None = None) -> int:
+        """Return a validated target budget from measured source tokens."""
+        if source_tokens < 1:
+            raise ValueError("source_tokens must be >= 1")
+        if explicit is not None:
+            if explicit < self.min_new_tokens:
+                raise ValueError(
+                    "explicit target budget must be >= generation.min_new_tokens"
+                )
+            return min(self.max_new_tokens, explicit)
+        budget = max(
+            self.min_new_tokens,
+            ceil(source_tokens * self.target_token_multiplier),
+        )
+        if source_tokens <= 32:
+            budget = min(budget, self.short_text_max_new_tokens)
+        return min(self.max_new_tokens, budget)
+
+
+@dataclass(frozen=True)
+class QualityConfig:
+    """Input-quality policy shared by direct and HTTP translation paths."""
+    unknown_token_policy: str = "warn"  # allow | warn | reject
+    glossary_file: str = "src/image_translation/config/glossary.tsv"
+    glossary_required: bool = True
+
+    def __post_init__(self) -> None:
+        if self.unknown_token_policy not in {"allow", "warn", "reject"}:
+            raise ValueError(
+                "quality.unknown_token_policy must be one of "
+                "'allow', 'warn', or 'reject'"
+            )
+        if not isinstance(self.glossary_file, str) or not self.glossary_file.strip():
+            raise ValueError("quality.glossary_file must be a non-empty path")
 
 
 @dataclass
@@ -47,6 +120,7 @@ class TranslationConfig:
     batch_size: int = 8
     max_input_characters: int = 4000
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
     model_cache_dir: Optional[str] = None
     allow_model_download: bool = True
     local_files_only: bool = False

@@ -8,13 +8,17 @@
   "runtime": {
     "warmup_on_start": true
   },
+  "quality": {
+    "unknown_token_policy": "warn",
+    "glossary_file": "src/image_translation/config/glossary.tsv",
+    "glossary_required": true
+  },
   "structured": {
     "enabled": true,
     "max_chapter_characters": 100000,
     "max_segment_tokens": 450,
     "max_target_tokens": 400,
     "context_window_tokens": 0,
-    "glossary": [],
     "preserve_patterns": [],
     "translatable_attributes": [],
     "excluded_tags": ["script", "style", "code", "pre"],
@@ -41,9 +45,18 @@
     "max_input_characters": 4000,
     "generation": {
       "max_new_tokens": 256,
+      "min_new_tokens": 1,
+      "target_token_multiplier": 2.5,
+      "short_text_max_new_tokens": 64,
       "num_beams": 4,
       "length_penalty": 1.0,
-      "early_stopping": true
+      "early_stopping": true,
+      "repetition_check": true,
+      "max_repeated_token_run": 3,
+      "max_repeated_ngram_ratio": 0.35,
+      "retry_on_degenerate_output": true,
+      "retry_num_beams": 1,
+      "retry_max_new_tokens": 64
     }
   }
 }

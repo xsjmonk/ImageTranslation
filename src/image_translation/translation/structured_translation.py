@@ -58,7 +58,11 @@ from .chapter_chunking import (
     segment_blocks,
 )
 from .config import GlossaryEntry, StructuredConfig, TranslationConfig
-from .exceptions import BatchItemError, StructuredTranslationError
+from .exceptions import (
+    BatchItemError,
+    StructuredTranslationError,
+    TranslationQualityError,
+)
 from .html_document import HTMLDocument
 from .html_protection import DEFAULT_PREFIX, ProtectionMap, assert_prefix_safe
 from .language_segments import LanguageKind, classify, protect_identifiers
@@ -914,6 +918,8 @@ class StructuredTranslator:
                 target_lang=target_lang,
                 max_new_tokens=target_budget,
             )
+        except TranslationQualityError:
+            raise
         except Exception as e:
             logger.exception("model call failed: %s", e)
             raise StructuredTranslationError("model call failed") from e
