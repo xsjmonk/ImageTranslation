@@ -8,7 +8,6 @@ from .config import (
     GenerationConfig,
     QualityConfig,
     StructuredConfig,
-    GlossaryEntry,
 )
 from .exceptions import (
     StructuredTranslationError,
@@ -20,11 +19,11 @@ from .exceptions import (
     TranslationQualityError,
 )
 from .factory import create_translator
-from .glossary import GlossaryTranslator, load_glossary_file
 from .html_document import HTMLDocument
 from .html_protection import ProtectionMap
 from .language_segments import classify, LanguageKind, protect_identifiers
-from .m2m100_translator import M2M100Translator
+from .seq2seq_translator import Seq2SeqTranslator
+from .model_adapters import ModelFamilyAdapter, create_model_family_adapter
 from .models import TranslationRequest, TranslationResult, TranslationRuntimeInfo
 from .reconstruction import rebuild_document
 from .structured_translation import (
@@ -43,17 +42,16 @@ __all__ = [
     "GenerationConfig",
     "QualityConfig",
     "StructuredConfig",
-    "GlossaryEntry",
     # Models
     "TranslationRequest",
     "TranslationResult",
     "TranslationRuntimeInfo",
     # Factory
     "create_translator",
-    "GlossaryTranslator",
-    "load_glossary_file",
     # Implementations
-    "M2M100Translator",
+    "Seq2SeqTranslator",
+    "ModelFamilyAdapter",
+    "create_model_family_adapter",
     "NoopTranslator",
     # Exceptions
     "TranslationError",

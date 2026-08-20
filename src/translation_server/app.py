@@ -21,7 +21,6 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import replace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -75,7 +74,7 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
 
     app = FastAPI(
         title="Translation Server",
-        description="Local GPU translation service (M2M100 zh→en, plain + HTML)",
+        description="Local GPU translation service (NLLB zh→en, plain + HTML)",
         version="0.1.0",
         lifespan=lifespan,
     )
@@ -91,12 +90,17 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         info = runtime.translator.runtime_info
+        configured = runtime.config.translation
         return HealthResponse(
             status="ok" if info.ready else "starting",
-            model=info.model_name,
-            model_revision=info.model_revision,
+            model=info.model_name or configured.model_name,
+            model_family=info.model_family or configured.model_family,
+            model_revision=info.model_revision or configured.model_revision,
+            source_language=info.source_language or configured.source_language,
+            target_language=info.target_language or configured.target_language,
             device=info.device,
             precision=info.precision,
+            dtype=info.dtype,
             ready=info.ready,
             cache_dir=info.cache_dir,
             snapshot_path=info.snapshot_path,
@@ -176,7 +180,7 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
                     runtime, translator, req, source_lang, target_lang, correlation_id
                 )
             return await _translate_plain(
-                runtime.quality_translator,
+                translator,
                 req,
                 source_lang,
                 target_lang,
@@ -257,7 +261,7 @@ async def _translate_html(
     runtime, translator, req: TranslateRequest, source_lang: str, target_lang: str,
     correlation_id: str,
 ) -> TranslateResponse:
-    cfg = replace(runtime.config.structured, glossary=runtime.glossary)
+    cfg = runtime.config.structured
     if not cfg.enabled:
         raise _http(
             400,

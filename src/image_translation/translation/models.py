@@ -35,9 +35,13 @@ class TranslationResult:
 class TranslationRuntimeInfo:
     """Metadata about the loaded translation engine."""
     model_name: str = ""
+    model_family: str = ""
     model_revision: str = ""
+    source_language: str = ""
+    target_language: str = ""
     device: str = ""
     precision: str = ""
+    dtype: str = ""
     cuda_available: bool = False
     gpu_name: str = ""
     ready: bool = False
@@ -62,3 +66,4 @@ class ResolvedModel:
     cache_dir: str               # "" = HF default cache
     cache_status: str            # "cache_hit" | "download"
     offline: bool                # effective offline flag
+    model_family: str = ""

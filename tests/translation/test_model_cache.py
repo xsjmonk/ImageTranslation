@@ -15,7 +15,7 @@ import pytest
 
 from image_translation.translation.config import TranslationConfig
 from image_translation.translation.exceptions import TranslationModelLoadError
-from image_translation.translation.m2m100_translator import M2M100Translator
+from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def _patch_transformers(monkeypatch):
                 "attention_mask": torch.ones(n, 4, dtype=torch.long),
             }
 
-        def get_lang_id(self, lang):
+        def convert_tokens_to_ids(self, lang):
             return 1
 
         def batch_decode(self, generated, skip_special_tokens=True):
@@ -154,18 +154,18 @@ def _patch_transformers(monkeypatch):
         return model
 
     monkeypatch.setattr(
-        transformers.M2M100Tokenizer, "from_pretrained",
+        transformers.AutoTokenizer, "from_pretrained",
         classmethod(lambda cls, path, **kw: _tok(path, kw)),
     )
     monkeypatch.setattr(
-        transformers.M2M100ForConditionalGeneration, "from_pretrained",
+        transformers.AutoModelForSeq2SeqLM, "from_pretrained",
         classmethod(lambda cls, path, **kw: _mod(path, kw)),
     )
     return loaded
 
 
-def _make_translator(config: TranslationConfig) -> M2M100Translator:
-    return M2M100Translator(config)
+def _make_translator(config: TranslationConfig) -> Seq2SeqTranslator:
+    return Seq2SeqTranslator(config)
 
 
 @pytest.fixture
@@ -373,7 +373,7 @@ class TestHtmlMeasurementUsesLoadedTokenizer:
             allow_model_download=not offline,
             model_revision=revision,
         )
-        t = M2M100Translator(cfg)
+        t = Seq2SeqTranslator(cfg)
         st = StructuredTranslator(
             t, StructuredConfig(max_segment_tokens=40), TranslationConfig()
         )
@@ -440,7 +440,7 @@ class TestHtmlMeasurementUsesLoadedTokenizer:
         cache = str((tmp_path / "cache").resolve())
         hub.seed(cache)
         cfg = TranslationConfig(device="cpu", model_cache_dir=cache)
-        t = M2M100Translator(cfg)
+        t = Seq2SeqTranslator(cfg)
         t.warmup()
         tokenizer = loaded.tokenizer
         base_call = type(tokenizer).__call__

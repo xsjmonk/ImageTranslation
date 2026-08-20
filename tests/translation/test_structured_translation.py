@@ -15,7 +15,6 @@ from image_translation.translation.structured_translation import (
     translate_html,
 )
 
-import image_translation.translation.structured_translation as st_mod
 
 
 class FakeTranslator(Translator):
@@ -65,15 +64,6 @@ class FakeTranslator(Translator):
                 )
             )
         return out
-
-
-@pytest.fixture(autouse=True)
-def fake_measure(monkeypatch):
-    """Keep unit tests hermetic: no HF tokenizer/network."""
-    class FakeTok:
-        def __call__(self, text, truncation=False):
-            return {"input_ids": list(range(max(1, (len(text) + 1) // 2)))}
-    monkeypatch.setattr(st_mod, "_get_measure_tokenizer", lambda *a, **k: FakeTok())
 
 
 MIXED_HTML = """<h1>产品介绍</h1>

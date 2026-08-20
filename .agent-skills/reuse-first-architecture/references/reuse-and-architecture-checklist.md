@@ -32,7 +32,7 @@ Run this checklist before and after any architecture-sensitive change.
       through `Translator.measure_source_tokens`, never a second
       `from_pretrained`.
 - [ ] Cache, offline, revision, GPU, precision, and language-pair policy
-      have one owner (`M2M100Translator` + config).
+      have one owner (`Seq2SeqTranslator` + model-family adapter + config).
 - [ ] No independent Hugging Face access from HTML segmentation or other
       callers after the model is loaded.
 

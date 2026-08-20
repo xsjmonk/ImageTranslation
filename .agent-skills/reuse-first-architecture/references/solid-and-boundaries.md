@@ -9,9 +9,9 @@ rules testable.
 | --- | --- |
 | HTTP transport | `src/translation_server` (FastAPI app, api models, runtime) |
 | Orchestration | `StructuredTranslator` (HTML-aware translation flow) |
-| Model inference | `M2M100Translator` (tokenizer + model, generation) |
+| Model inference | `Seq2SeqTranslator` + `ModelFamilyAdapter` |
 | Parsing/protection/reconstruction | `html_document`, `html_protection`, `reconstruction` |
-| Cache/resolution policy | `M2M100Translator._resolve_model_snapshot` + `ResolvedModel` |
+| Cache/resolution policy | `Seq2SeqTranslator._resolve_model_snapshot` + `ResolvedModel` |
 | Configuration validation | config modules (`TranslationConfig`, server config) |
 | Filesystem/JSON/image utilities | `utilities/` |
 

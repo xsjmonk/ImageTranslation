@@ -24,7 +24,7 @@ Protected-span translation (documented):
   runs reproduces the block text; every source text node is covered exactly
   once (or is a whitespace-only node preserved without being sent).
 
-Context strategy (documented): M2M100's generate() has no reliable
+Context strategy (documented): the configured model's generate() has no reliable
 context-injection API, so chapter-level context is NOT implemented
 (``context_window_tokens`` must stay 0). Terminology consistency across
 segments is guaranteed for protected terms (identical placeholders restore
@@ -74,7 +74,6 @@ RUN_CHINESE = "chinese"                  # translated
 RUN_ENGLISH = "english_protected"        # preserved exactly (placeholder)
 RUN_IDENTIFIER = "identifier_protected"  # preserved exactly (placeholder)
 RUN_MODEL_NUMBER = "model_number_protected"  # user-configured preserve pattern
-RUN_GLOSSARY = "glossary_protected"      # glossary term -> fixed target term
 RUN_ENTITY = "entity_protected"          # character reference, exact spelling
 RUN_TAG = "tag"                          # inline tag placeholder
 RUN_ATTRIBUTE = "attribute"              # attribute value segment
@@ -89,7 +88,7 @@ class Run:
         node_id: text node id; "tag" for tag runs; "attr:<elem>:<name>" for
             attribute runs.
         kind: RUN_CHINESE / RUN_ENGLISH / RUN_IDENTIFIER / RUN_MODEL_NUMBER /
-            RUN_GLOSSARY / RUN_ENTITY / RUN_TAG / RUN_ATTRIBUTE /
+            RUN_ENTITY / RUN_TAG / RUN_ATTRIBUTE /
             RUN_WHITESPACE.
         raw: original source content (text, serialized tag, or attribute
             value) — restored verbatim for protected runs. Entity runs carry
@@ -98,8 +97,7 @@ class Run:
         protected: what appears in ``Segment.source_text`` (placeholder token
             for protected runs, raw text for chinese runs).
         placeholder: the placeholder token, or None for translated runs.
-        restore_text: text restored instead of ``raw`` (glossary runs restore
-            the configured TARGET term; None = restore ``raw`` verbatim).
+        restore_text: text restored instead of ``raw`` verbatim.
         translate: True only for chinese/attribute runs.
         offset_start / offset_end: character offsets within the block text
             (coverage invariant).
@@ -354,68 +352,11 @@ def prepare_block(block: Block, pmap: ProtectionMap,
     return items
 
 
-def _glossary_boundary_char(ch: str) -> bool:
-    """True when ch is a word character for glossary boundary purposes:
-    latin alphanumerics and underscore ONLY.
-
-    CJK ideographs are deliberately NOT word chars: Chinese text has no
-    spaces, so a term like 充电器 naturally sits adjacent to other
-    ideographs ('使用充电器。'); requiring a non-CJK neighbor would make
-    the glossary unusable for Chinese. The corruption risk the boundary
-    policy guards against is latin word embedding ('cat' inside 'catalog'),
-    which this rule prevents. Documented in GlossaryEntry.
-    """
-    return bool(re.match(r"[A-Za-z0-9_]", ch))
-
-
-def find_glossary_spans(text: str, entries, excluded_ranges=None) -> list:
-    """Find (start, end, entry) occurrences of glossary terms in text.
-
-    Boundary policy (documented):
-    - entry.exact=True: whole-occurrence only — the term must not be embedded
-      in a latin word (bounded by non-latin-alphanumerics or text edges);
-      CJK ideograph neighbors are accepted (Chinese has no spaces);
-    - entry.exact=False: explicit opt-in — matches anywhere (may split words).
-
-    ``excluded_ranges``: (start, end) intervals in which matches are
-    dropped (protected identifiers win over glossary terms). Config
-    validation forbids overlapping glossary terms, so occurrences cannot
-    overlap; this is double-checked defensively (earliest span wins).
-    """
-    excluded_ranges = excluded_ranges or []
-    spans = []
-    for entry in entries:
-        term = entry.source
-        for m in re.finditer(re.escape(term), text):
-            if any(s <= m.start() and m.end() <= e for s, e in excluded_ranges):
-                continue
-            if entry.exact:
-                left_ok = m.start() == 0 or not _glossary_boundary_char(
-                    text[m.start() - 1]
-                )
-                right_ok = m.end() == len(text) or not _glossary_boundary_char(
-                    text[m.end()]
-                )
-                if not (left_ok and right_ok):
-                    continue
-            spans.append((m.start(), m.end(), entry))
-    spans.sort(key=lambda s: (s[0], -s[1]))
-    result = []
-    last_end = -1
-    for start, end, entry in spans:
-        if start < last_end:
-            continue  # overlapping occurrence: earliest span wins
-        result.append((start, end, entry))
-        last_end = end
-    return result
-
-
 def build_text_runs(
     node_id: str,
     raw: str,
     pmap: ProtectionMap,
     offset_base: int,
-    glossary=None,
     preserve_patterns=(),
 ) -> List[Run]:
     """Turn one raw text node into explicit runs.
@@ -425,8 +366,7 @@ def build_text_runs(
       ``entity_protected`` runs restored to their EXACT source spelling;
     - maximal CJK regions (including surrounding whitespace) -> translated
       chinese runs (one run per region — no adjacent translate runs);
-    - configured glossary terms inside chinese regions -> protected runs
-      restored to the configured TARGET term (terminology memory);
+    - configured       restored to the configured TARGET term (terminology memory);
     - user-configured ``preserve_patterns`` (project model formats) ->
       ``model_number_protected`` runs, exact;
     - identifiers (URLs, codes, versions, measurements, ...) -> protected;
@@ -435,8 +375,7 @@ def build_text_runs(
       model renders spacing naturally (never double-restored).
 
     All protected spans get placeholders; their ``raw`` holds the original
-    text and is restored verbatim after inference (glossary runs restore
-    ``restore_text`` — the configured target term; entity runs carry the
+    text and is restored verbatim after inference; entity runs carry the
     sentinel marker, which the serializer converts to the exact spelling).
     """
     runs: List[Run] = []
@@ -448,7 +387,7 @@ def build_text_runs(
         if text_piece:
             runs.extend(_text_runs(
                 node_id, text_piece, pmap, offset_base + cursor,
-                glossary, preserve_patterns,
+                preserve_patterns,
             ))
             cursor += len(text_piece)
         if i + 2 < len(pieces):
@@ -477,7 +416,6 @@ def _text_runs(
     raw: str,
     pmap: ProtectionMap,
     offset_base: int,
-    glossary=None,
     preserve_patterns=(),
 ) -> List[Run]:
     """Region-splitting + run emission for entity-free text (see
@@ -485,7 +423,7 @@ def _text_runs(
     # 1) Regions: chinese regions absorb adjacent whitespace-only spans.
     #    Non-chinese regions are stripped of edge whitespace first, so the
     #    spaces around identifiers/English never become placeholder runs
-    #    (M2M100 drops whitespace-only placeholders; the whitespace is
+    #    (the model may drop whitespace-only placeholders; the whitespace is
     #    carried by adjacent chinese runs' original edge whitespace instead).
     regions: List[tuple] = []  # (is_chinese, text)
     pending_ws = ""
@@ -525,40 +463,10 @@ def _text_runs(
     runs: List[Run] = []
     cursor = 0
     for is_chinese, span in merged:
-        # Glossary terms (terminology memory) become protected runs in BOTH
-        # chinese and english regions; the gaps keep their normal handling.
-        # Protected identifiers win over glossary terms (identifiers are
-        # non-negotiable exact).
-        excluded_ranges = []
-        if not is_chinese:
-            excluded_ranges = [
-                (s, e) for s, e, _kind, _content in find_protected_spans(span)
-            ]
-        pos = 0
-        for start, end, entry in find_glossary_spans(
-            span, glossary or (), excluded_ranges=excluded_ranges
-        ):
-            if start > pos:
-                _emit_region(runs, node_id, is_chinese, span[pos:start],
-                             pmap, offset_base + cursor + pos,
-                             preserve_patterns)
-            token = pmap.reserve(entry.target, kind="glossary")
-            runs.append(Run(
-                node_id=node_id,
-                kind=RUN_GLOSSARY,
-                raw=entry.source,
-                protected=token,
-                placeholder=token,
-                restore_text=entry.target,
-                offset_start=offset_base + cursor + start,
-                offset_end=offset_base + cursor + end,
-                sequence_index=len(runs),
-            ))
-            pos = end
-        if pos < len(span):
-            _emit_region(runs, node_id, is_chinese, span[pos:],
-                         pmap, offset_base + cursor + pos,
-                         preserve_patterns)
+        _emit_region(
+            runs, node_id, is_chinese, span, pmap,
+            offset_base + cursor, preserve_patterns
+        )
         cursor += len(span)
     return runs
 
@@ -566,7 +474,7 @@ def _text_runs(
 def _emit_region(runs: List[Run], node_id: str, is_chinese: bool, span: str,
                  pmap: ProtectionMap, offset_base: int,
                  preserve_patterns=()) -> None:
-    """Emit normal runs for a region gap (no glossary terms inside)."""
+    """Emit one normal translated or protected region."""
     if is_chinese:
         runs.append(Run(
             node_id=node_id,
@@ -671,7 +579,7 @@ def _last_boundary(text: str, limit: int, boundaries: str) -> int:
 def _with_spacing(text: str, prefix: str = "__ITRANSLATE_") -> str:
     """Model-facing source: wrap every placeholder token in spaces.
 
-    Empirically verified with M2M100: a placeholder directly adjacent to CJK
+    Empirically verified with the sequence-to-sequence model: a placeholder directly adjacent to CJK
     text (or to another placeholder) gets re-segmented and can be dropped by
     the model; space-separated placeholders are preserved exactly. The extra
     spaces are model-side only — reconstruction maps output pieces onto the
@@ -709,7 +617,6 @@ def segment_blocks(
     document_id: str = "doc",
     source_language: str = "zh",
     target_language: str = "en",
-    glossary=None,
     preserve_patterns=(),
     translatable_attrs=frozenset(),
 ) -> List[Segment]:
@@ -719,8 +626,7 @@ def segment_blocks(
     the next text would exceed the budget, the text is split at a
     sentence/clause boundary (hard split last), and the segment is flushed.
     Tag placeholders are never split and always stay inside the segment that
-    contains them. ``glossary`` entries become protected runs (terminology
-    memory) — see build_text_runs.
+    contains them.
 
     Build-time coverage invariants (fail closed with ValueError):
     - ``segment.source_text`` == spacing-normalized concatenation of every
@@ -845,7 +751,7 @@ def segment_blocks(
 
             def protected_for(fragment: str) -> str:
                 probe_runs = build_text_runs(
-                    node_id, fragment, probe_pmap, 0, glossary=glossary,
+                    node_id, fragment, probe_pmap, 0,
                     preserve_patterns=preserve_patterns,
                 )
                 return "".join(r.protected for r in probe_runs)
@@ -853,7 +759,7 @@ def segment_blocks(
             def emit(fragment: str) -> None:
                 append_runs(
                     build_text_runs(
-                        node_id, fragment, pmap, orig_cursor, glossary=glossary,
+                        node_id, fragment, pmap, orig_cursor,
                         preserve_patterns=preserve_patterns,
                     )
                 )
@@ -869,16 +775,10 @@ def segment_blocks(
                     emit(text)
                     text = ""
                 else:
-                    # Glossary terms are atomic: a cut must never land inside
-                    # one (the same term must be glossary-mapped in exactly
-                    # one segment — consistency by construction). Entity
-                    # sentinel markers are equally atomic: a cut inside a
+                    # Entity sentinel markers are atomic: a cut inside a
                     # marker would split one entity across two segments and
-                    # corrupt the exact-spelling restoration.
-                    term_spans = [
-                        (s, e) for s, e, _entry
-                        in find_glossary_spans(text, glossary or ())
-                    ]
+                    # corrupt exact-spelling restoration.
+                    term_spans = []
                     marker_spans = [
                         (m.start(), m.end())
                         for m in _ENTITY_MARKER_RE.finditer(text)

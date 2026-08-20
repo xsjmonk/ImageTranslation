@@ -16,7 +16,6 @@ from image_translation.translation.chapter_chunking import (
     segment_blocks,
 )
 from image_translation.translation.config import (
-    GlossaryEntry,
     StructuredConfig,
     TranslationConfig,
 )

@@ -10,12 +10,14 @@ from typing import Optional
 
 @dataclass
 class GenerationConfig:
-    """M2M100 generation policy, including quality safeguards."""
-    max_new_tokens: int = 256
+    """Deterministic sequence-to-sequence generation policy."""
+    max_new_tokens: int = 512
     min_new_tokens: int = 1
     target_token_multiplier: float = 2.5
     short_text_max_new_tokens: int = 64
     num_beams: int = 4
+    do_sample: bool = False
+    no_repeat_ngram_size: int | None = None
     length_penalty: float = 1.0
     early_stopping: bool = True
     repetition_check: bool = True
@@ -42,6 +44,8 @@ class GenerationConfig:
             )
         if self.num_beams < 1 or self.retry_num_beams < 1:
             raise ValueError("generation beam counts must be >= 1")
+        if self.no_repeat_ngram_size is not None and self.no_repeat_ngram_size < 2:
+            raise ValueError("generation.no_repeat_ngram_size must be null or >= 2")
         if self.max_repeated_token_run < 2:
             raise ValueError("generation.max_repeated_token_run must be >= 2")
         if not 0 <= self.max_repeated_ngram_ratio <= 1:
@@ -76,8 +80,6 @@ class GenerationConfig:
 class QualityConfig:
     """Input-quality policy shared by direct and HTTP translation paths."""
     unknown_token_policy: str = "warn"  # allow | warn | reject
-    glossary_file: str = "src/image_translation/config/glossary.tsv"
-    glossary_required: bool = True
 
     def __post_init__(self) -> None:
         if self.unknown_token_policy not in {"allow", "warn", "reject"}:
@@ -85,22 +87,17 @@ class QualityConfig:
                 "quality.unknown_token_policy must be one of "
                 "'allow', 'warn', or 'reject'"
             )
-        if not isinstance(self.glossary_file, str) or not self.glossary_file.strip():
-            raise ValueError("quality.glossary_file must be a non-empty path")
-
-
 @dataclass
 class TranslationConfig:
     """Reusable translation configuration.
 
     Used by both ImageTranslation pipeline and the standalone translation server.
 
-    Model cache semantics:
-    - model_cache_dir (optional): Hugging Face cache ROOT for the model
-      (HF creates its normal models--<org>--<name> structure below it).
-      Omitted/empty = the HF default cache (backward compatible). When set,
-      it is the AUTHORITATIVE location — the implementation never silently
-      falls back to the default cache.
+    ``model_cache_dir`` is an injected, resolved cache root supplied by the
+    server composition root. The server owns cache policy; this field exists
+    so the shared translator can consume that immutable resolved value.
+    Standalone callers may leave it unset, but must not infer a model-specific
+    cache location.
     - model_revision: revision resolved consistently for snapshot, tokenizer,
       and model loading (default "main").
     - allow_model_download: permits downloading only when the requested
@@ -109,16 +106,19 @@ class TranslationConfig:
       error. Contradictory with allow_model_download=true (rejected at
       validation time).
     """
-    model_name: str = "facebook/m2m100_418M"
+    model_name: str = "facebook/nllb-200-distilled-600M"
+    model_family: str = "nllb"
     model_revision: str = "main"
-    source_language: str = "zh"
-    target_language: str = "en"
+    source_language: str = "zho_Hans"
+    target_language: str = "eng_Latn"
     device: str = "cuda"
     cuda_device: int = 0
     allow_cpu_fallback: bool = False
     precision: str = "auto"  # auto | float16 | float32
     batch_size: int = 8
     max_input_characters: int = 4000
+    max_input_tokens: int = 1024
+    commercial_use: bool = False
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     model_cache_dir: Optional[str] = None
@@ -138,6 +138,17 @@ class TranslationConfig:
             raise ValueError("max_input_characters must be >= 1")
         if self.batch_size < 1:
             raise ValueError("batch_size must be >= 1")
+        if self.max_input_tokens < 1:
+            raise ValueError("max_input_tokens must be >= 1")
+        if self.model_family not in {"nllb", "helsinki"}:
+            raise ValueError(
+                "model_family must be 'nllb' or 'helsinki'"
+            )
+        if self.commercial_use and self.model_family == "nllb":
+            raise ValueError(
+                "NLLB is CC-BY-NC-4.0 and cannot be used for commercial_use; "
+                "configure model_family='helsinki' explicitly"
+            )
         if not self.model_name or not isinstance(self.model_name, str):
             raise ValueError("model_name must be a non-empty string")
         if not self.model_revision or not isinstance(self.model_revision, str):
@@ -156,46 +167,6 @@ class TranslationConfig:
 
 
 @dataclass
-class GlossaryEntry:
-    """A chapter terminology mapping (terminology memory).
-
-    Attributes:
-        source: the source-language term (e.g. a Chinese product name).
-        target: the exact target-language term to restore after inference.
-        exact: boundary policy:
-            - True (default): whole-occurrence match only — the term must
-              not be embedded in a latin word (bounded by non-latin
-              alphanumerics/underscore or text edges). CJK ideograph
-              neighbors are accepted: Chinese text has no spaces, so a term
-              like 充电器 naturally sits adjacent to other ideographs
-              ('使用充电器。'). This prevents 'cat' matching inside
-              'catalog' while keeping the glossary usable for Chinese.
-            - False: explicit opt-in that permits matches inside latin
-              words (documented trade-off: may split words the user did not
-              intend). Use only when the term is a deliberate prefix/suffix.
-
-    Glossary terms are replaced with protected placeholders BEFORE model
-    inference and restored to ``target`` afterwards, so the same configured
-    term maps to the same target throughout the entire chapter (consistent
-    by construction) and the model can never paraphrase it.
-    """
-
-    source: str
-    target: str
-    exact: bool = True
-
-    def __post_init__(self) -> None:
-        if not self.source or not self.source.strip():
-            raise ValueError("glossary source term must be non-empty")
-        if not self.target or not self.target.strip():
-            raise ValueError("glossary target term must be non-empty")
-        if self.source == self.target:
-            raise ValueError(
-                f"glossary source and target must differ: {self.source!r}"
-            )
-
-
-@dataclass
 class StructuredConfig:
     """Structured (HTML-aware) translation configuration.
 
@@ -207,14 +178,11 @@ class StructuredConfig:
     - max_target_tokens: per-segment target budget passed to generation;
       expansion assumption: target ≈ 2.5× source tokens, capped here.
     - context_window_tokens: CONTEXT INJECTION IS NOT IMPLEMENTED for
-      M2M100 (its generate() has no reliable context API). This setting is
+      the configured model family (no reliable context API). This setting is
       explicitly UNSUPPORTED: it MUST stay 0 and any non-zero value raises
       a configuration error. Segment adjacency (prev/next segment ids) is a
       diagnostics-only record; it is NOT context and is never sent to the
       model.
-    - glossary: chapter terminology memory. Each entry maps a source term to
-      an exact target term; terms are protected before inference and restored
-      consistently across every segment. See GlossaryEntry.
     - preserve_patterns: configurable regex patterns for project-specific
       model formats/product codes. Matches inside non-Chinese (Latin) spans
       become ``model_number_protected`` runs — preserved exactly, never
@@ -239,7 +207,6 @@ class StructuredConfig:
     max_segment_tokens: int = 450
     max_target_tokens: int = 400
     context_window_tokens: int = 0
-    glossary: tuple = ()  # tuple[GlossaryEntry, ...] — terminology memory
     preserve_patterns: tuple = ()  # tuple[str, ...] — regexes (model formats)
     translatable_attributes: tuple = ()  # e.g. ("alt", "title", "aria-label")
     excluded_tags: tuple = ("script", "style", "code", "pre")
@@ -260,7 +227,8 @@ class StructuredConfig:
         if self.context_window_tokens != 0:
             raise ValueError(
                 "context_window_tokens must be 0: context injection is NOT "
-                "implemented for M2M100 (no reliable context API); this "
+                "implemented for the configured model family (no reliable "
+                "context API); this "
                 "setting is explicitly unsupported"
             )
         if self.segment_warning_seconds <= 0:
@@ -285,23 +253,3 @@ class StructuredConfig:
                 raise ValueError(
                     f"preserve_patterns entry {pat!r} is not a valid regex: {e}"
                 )
-        # --- glossary validation ---
-        entries = list(self.glossary)
-        for e in entries:
-            if not isinstance(e, GlossaryEntry):
-                raise ValueError(
-                    "glossary entries must be GlossaryEntry instances"
-                )
-        sources = [e.source for e in entries]
-        if len(sources) != len(set(sources)):
-            raise ValueError("glossary contains duplicate source terms")
-        # Ambiguity guard: with a shared boundary, one term must not be a
-        # substring of another (replacement order would be ambiguous).
-        for a in entries:
-            for b in entries:
-                if a is b:
-                    continue
-                if a.source in b.source or b.source in a.source:
-                    raise ValueError(
-                        f"glossary terms overlap: {a.source!r} vs {b.source!r}"
-                    )

@@ -1,4 +1,4 @@
-"""GPU integration test — requires CUDA, downloads M2M100 model (~1.7 GB).
+"""GPU integration test — requires CUDA, downloads NLLB model (~1.7 GB).
 
 Excluded from default unit suite. Run explicitly:
     python tests/translation/smoke_test.py
@@ -22,8 +22,8 @@ pytestmark = [
 ]
 
 
-def test_m2m100_real_gpu_translation():
-    """Real GPU translation: loads facebook/m2m100_418M, translates zh→en."""
+def test_nllb_real_gpu_translation():
+    """Real GPU translation: loads facebook/nllb-200-distilled-600M, translates zh→en."""
     from image_translation.translation import TranslationConfig, create_translator
 
     t = create_translator(TranslationConfig())
@@ -50,5 +50,5 @@ if __name__ == "__main__":
     if not _CUDA_OK:
         print("SKIP: NVIDIA CUDA GPU required")
         raise SystemExit(2)
-    test_m2m100_real_gpu_translation()
+    test_nllb_real_gpu_translation()
     print("GPU smoke test passed.")

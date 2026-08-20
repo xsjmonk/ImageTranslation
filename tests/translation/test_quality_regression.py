@@ -1,9 +1,9 @@
-"""Quality regression tests — real M2M100 GPU, FP32 + num_beams=4 baseline.
+"""Quality regression tests — real NLLB GPU, FP32 + num_beams=4 baseline.
 
 Covers the observed failure modes (semantic corruption / repetition) with
 deterministic assertions on Chinese product-description text.
 
-Run explicitly (needs NVIDIA CUDA + the 418M model, ~2 GB VRAM):
+Run explicitly (needs NVIDIA CUDA + the NLLB model, ~2 GB VRAM):
     pytest tests/translation/test_quality_regression.py -v -s
 """
 
@@ -42,7 +42,7 @@ PHRASES = [
 
 # For each phrase: list of (alternative_needles, source_concept_label).
 # Output must contain at least one of the alternatives (lowercased).
-# Alternatives reflect the actual M2M100-418M mapping (e.g. 防水 -> water-resistant,
+# Alternatives reflect expected model output patterns (e.g. 防水 -> water-resistant,
 # 加厚 -> thick/thickened; in the short first phrase the model approximates
 # 加厚 as "heated" and 耐磨 as "resistant to ..." — noted per phrase).
 CONCEPT_CHECKS = [
@@ -57,7 +57,7 @@ CONCEPT_CHECKS = [
         (("thick", "thicken"), "加厚"),
         (("backpack", "bag"), "背包"),
         (("durab", "wear"), "耐磨耐用"),
-        (("daily", "commute"), "日常通勤"),
+        (("daily", "commut"), "日常通勤"),
         (("travel",), "旅行"),
     ],
     [
@@ -117,13 +117,16 @@ def _record_io(phrase: str, output: str, info) -> None:
 
 class TestDirectModuleQuality:
     def test_chinese_phrases_fp32_beams4(self):
-        from image_translation.translation import TranslationConfig, create_translator
+        from image_translation.translation import create_translator
+        from translation_server.config import load_server_config
 
-        # Defaults: precision='auto' -> FP32, num_beams=4, adaptive budget.
-        cfg = TranslationConfig()
+        # The direct path consumes the server-resolved cache and generation policy.
+        cfg = load_server_config().translation
         assert cfg.precision == "auto"
         assert cfg.generation.num_beams == 4
-        assert cfg.generation.max_new_tokens == 256
+        assert cfg.generation.max_new_tokens == 512
+        assert cfg.generation.do_sample is False
+        assert cfg.generation.no_repeat_ngram_size is None
 
         t = create_translator(cfg)
 
@@ -150,10 +153,15 @@ class TestDirectModuleQuality:
 class TestApiParity:
     def test_direct_vs_api_same_output(self):
         """Same inputs through the direct module and the live HTTP API."""
-        from image_translation.translation import TranslationConfig, create_translator
+        from image_translation.translation import create_translator
+        from translation_server.config import load_server_config
+        from translation_server.runtime import TranslationRuntime
+        from translation_server.app import create_app
+
+        cfg = load_server_config()
 
         # --- Phase 1: direct module ---
-        t = create_translator(TranslationConfig())
+        t = create_translator(cfg.translation)
         direct_outputs = {}
         for phrase in PHRASES:
             out = t.translate_text(phrase).translated_text
@@ -171,13 +179,12 @@ class TestApiParity:
         import uvicorn
         import requests
 
-        from translation_server.config import load_server_config
-        from translation_server.runtime import TranslationRuntime
-        from translation_server.app import create_app
-
-        cfg = load_server_config()  # repo translation-server.config.json
+        # The API reuses the same resolved configuration file.
         assert cfg.translation.precision == "auto"
         assert cfg.translation.generation.num_beams == 4
+        assert cfg.translation.generation.max_new_tokens == 512
+        assert cfg.translation.generation.do_sample is False
+        assert cfg.translation.generation.no_repeat_ngram_size is None
         assert cfg.runtime.warmup_on_start is True
 
         app = create_app(TranslationRuntime(cfg))
@@ -227,33 +234,12 @@ class TestApiParity:
             thread.join(timeout=15)
 
 
-class TestFailingProductTitleQuality:
-    def test_eyeglass_title_glossary_and_no_repetition(self):
-        from image_translation.translation import (
-            GlossaryEntry,
-            StructuredConfig,
-            StructuredTranslator,
-            TranslationConfig,
-            create_translator,
-        )
+class TestNllbProductTitleQuality:
+    def test_eyeglass_title_is_translated_without_repetition(self):
+        from image_translation.translation import TranslationConfig, create_translator
 
         source = "德国蔡司纯钛眼镜近视男可配度数防蓝光商务超轻镜框专业"
-        config = TranslationConfig()
-        translator = create_translator(config)
-        structured = StructuredTranslator(
-            translator,
-            StructuredConfig(
-                glossary=(
-                    GlossaryEntry("蔡司", "Zeiss"),
-                    GlossaryEntry("纯钛", "pure titanium"),
-                    GlossaryEntry("防蓝光", "blue-light protection"),
-                )
-            ),
-            config,
-        )
-        output = structured.translate(f"<p>{source}</p>").translated_html
-        lowered = output.casefold()
-        assert "zeiss" in lowered
-        assert "pure titanium" in lowered
-        assert "blue-light protection" in lowered
-        assert "bright bright bright bright" not in lowered
+        translator = create_translator(TranslationConfig())
+        output = translator.translate_text(source).translated_text
+        assert output.strip()
+        assert "bright bright bright bright" not in output.casefold()

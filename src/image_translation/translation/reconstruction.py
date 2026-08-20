@@ -9,7 +9,7 @@ Reconstruction contract (documented):
 - STRICT source-order contract: the complete protected-token sequence in the
   model output must equal the segment's source ``placeholder_order`` EXACTLY
   — tags, entities, bare-ampersand runs, English spans, identifiers, and
-  glossary terms included. Reordering within a tag interval is rejected:
+  protected runs included. Reordering within a tag interval is rejected:
   protected content stays in its original source slot and translated pieces
   map to their source slots from the exact sequence, never positionally
   after a reordered placeholder sequence;
@@ -36,6 +36,7 @@ Reconstruction contract (documented):
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Optional, Set
 
 from .chapter_chunking import Segment
@@ -44,6 +45,25 @@ from .html_document import HTMLDocument
 from .html_protection import find_unknown_placeholders
 
 logger = logging.getLogger(__name__)
+
+
+def _needs_word_boundary(left: str, right: str) -> bool:
+    """Prevent adjacent translated/protected English words merging."""
+    return bool(
+        left
+        and right
+        and re.search(r"[A-Za-z0-9]$", left)
+        and re.match(r"[A-Za-z0-9]", right)
+    )
+
+
+def _append_node_text(
+    node_content: dict, node_id: str, text: str, *, ensure_boundary: bool = False
+) -> None:
+    current = node_content.get(node_id, "")
+    if ensure_boundary and _needs_word_boundary(current, text):
+        current += " "
+    node_content[node_id] = current + text
 
 
 def rebuild_document(
@@ -101,7 +121,7 @@ def rebuild_document(
         # Strict full-sequence contract: the complete protected-token
         # sequence in the model output must equal the source placeholder
         # order exactly — tags, entities, bare-ampersand runs, English spans,
-        # identifiers, and glossary terms included. Reordering within a tag
+        # identifiers and protected runs included. Reordering within a tag
         # interval is REJECTED: protected content must stay in its original
         # source slot, and translated pieces map to their source slots
         # positionally from the exact sequence.
@@ -135,20 +155,46 @@ def rebuild_document(
                 rest = run.raw[len(leading):]
                 trailing = rest[len(rest.rstrip()):]
                 piece = leading + piece.strip() + trailing
-                node_content[run.node_id] = node_content.get(run.node_id, "") + piece
+                _append_node_text(node_content, run.node_id, piece)
             else:
-                # Protected run (English/identifier/glossary): restore the
-                # ORIGINAL text — glossary runs restore their configured
-                # TARGET term (restore_text); everything else restores raw.
-                node_content[run.node_id] = node_content.get(
-                    run.node_id, ""
-                ) + (run.restore_text or run.raw)
+                # Protected run: restore the ORIGINAL text; everything else
+                # restores raw.
+                _append_node_text(
+                    node_content,
+                    run.node_id,
+                    run.restore_text or run.raw,
+                    ensure_boundary=True,
+                )
         for i, slot in enumerate(seg.slots):
             if slot is None and pieces[i].strip():
                 logger.debug(
                     "segment %s: dropping model output in empty slot: %r",
                     seg.segment_id, pieces[i],
                 )
+
+    # Add a boundary when markup splits adjacent translated/protected words.
+    protected_nodes = {
+        run.node_id
+        for seg in segments
+        for run in seg.runs
+        if not run.translate and run.node_id != "tag"
+    }
+    previous_node = None
+    for node in doc.text_nodes():
+        if (
+            previous_node is not None
+            and previous_node.id in node_content
+            and node.id in node_content
+            and (
+                previous_node.id in protected_nodes
+                or node.id in protected_nodes
+            )
+            and _needs_word_boundary(
+                node_content[previous_node.id], node_content[node.id]
+            )
+        ):
+            node_content[node.id] = " " + node_content[node.id]
+        previous_node = node
 
     # Apply translated text to the document nodes
     for node in doc.text_nodes():

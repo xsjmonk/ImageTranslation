@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import logging
-
 from .base import Translator
 from .config import TranslationConfig
-
-logger = logging.getLogger(__name__)
 
 
 def create_translator(config: TranslationConfig) -> Translator:
@@ -22,14 +18,6 @@ def create_translator(config: TranslationConfig) -> Translator:
     Raises:
         ValueError: If the configured engine is unknown.
     """
-    model_name = config.model_name.lower()
+    from .seq2seq_translator import Seq2SeqTranslator
 
-    if "m2m100" in model_name:
-        from .m2m100_translator import M2M100Translator
-        logger.info("Creating M2M100 translator for model: %s", config.model_name)
-        return M2M100Translator(config)
-
-    raise ValueError(
-        f"Unknown translation engine for model '{config.model_name}'. "
-        f"Supported engines: m2m100."
-    )
+    return Seq2SeqTranslator(config)

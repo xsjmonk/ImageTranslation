@@ -15,12 +15,15 @@ import pytest
 
 
 def _write_config(tmp_path: Path, cache_dir: str, offline: bool = False) -> Path:
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
     p = tmp_path / "server.config.json"
     p.write_text(json.dumps({
         "server": {"host": "127.0.0.1", "port": 18099},
-        "translation": {
-            "model_name": "facebook/m2m100_418M",
+        "server": {
             "model_cache_dir": cache_dir,
+        },
+        "translation": {
+            "model_name": "facebook/nllb-200-distilled-600M",
             "allow_model_download": not offline,
             "local_files_only": offline,
         },
@@ -79,10 +82,10 @@ def no_model_load(monkeypatch):
     def _fail(*a, **k):
         raise AssertionError("check_cache must not load tokenizer/model")
 
-    monkeypatch.setattr(transformers.M2M100Tokenizer, "from_pretrained",
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
                         classmethod(lambda cls, *a, **k: _fail(*a, **k)))
     monkeypatch.setattr(
-        transformers.M2M100ForConditionalGeneration, "from_pretrained",
+        transformers.AutoModelForSeq2SeqLM, "from_pretrained",
         classmethod(lambda cls, *a, **k: _fail(*a, **k)))
 
 
@@ -203,7 +206,7 @@ class TestCacheEndpoint:
             @property
             def runtime_info(self):
                 return TranslationRuntimeInfo(
-                    model_name="facebook/m2m100_418M",
+                    model_name="facebook/nllb-200-distilled-600M",
                     model_revision="main",
                     device="cuda:0",
                     precision="float32",
@@ -224,7 +227,7 @@ class TestCacheEndpoint:
         resp = self._client(ReadyFake()).get("/cache")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["model"] == "facebook/m2m100_418M"
+        assert data["model"] == "facebook/nllb-200-distilled-600M"
         assert data["revision"] == "main"
         assert data["cache_dir"] == "C:/models/hf"
         assert data["snapshot_path"] == "C:/models/hf/snap"
@@ -344,7 +347,7 @@ class TestStartupCacheDiagnostics:
         cfg_path = _write_config(tmp_path, str(tmp_path / "cache"))
         runtime = TranslationRuntime(load_server_config(cfg_path))
         diag = runtime.cache_diagnostics()
-        assert diag["model"] == "facebook/m2m100_418M"
+        assert diag["model"] == "facebook/nllb-200-distilled-600M"
         assert diag["revision"] == "main"
         assert diag["cache_dir"] == str((tmp_path / "cache").resolve())
         assert diag["offline"] is False

@@ -1,10 +1,11 @@
-"""M2M100 418M GPU translator — lazy-loaded, CUDA-required by default."""
+"""Sequence-to-sequence GPU translator — lazy-loaded, CUDA-required by default."""
 
 from __future__ import annotations
 
 import logging
 import re
 import threading
+import time
 from typing import List, Optional, Sequence
 
 from .base import Translator
@@ -17,16 +18,17 @@ from .exceptions import (
     TranslationModelLoadError,
     TranslationQualityError,
 )
+from .model_adapters import create_model_family_adapter
 from .models import ResolvedModel, TranslationResult, TranslationRuntimeInfo
 from .text_utils import preprocess
 
 logger = logging.getLogger(__name__)
 
 
-class M2M100Translator(Translator):
-    """M2M100 418M neural machine translation engine.
+class Seq2SeqTranslator(Translator):
+    """Configurable neural machine translation engine.
 
-    Uses facebook/m2m100_418M via Hugging Face Transformers on NVIDIA GPU.
+    Uses the configured model family via Hugging Face Transformers.
     Model is lazy-loaded on first translate call.
     Thread-safe: one operation (set language → tokenize → generate → decode)
     is atomic with respect to tokenizer/model state.
@@ -42,6 +44,7 @@ class M2M100Translator(Translator):
         self._cache_status: str = ""
         self._cache_dir: str = ""
         self._resolved: Optional[ResolvedModel] = None
+        self._adapter = create_model_family_adapter(config)
         self._last_quality_diagnostics: dict = {}
         # One computed effective-offline flag for resolution, tokenizer,
         # model, and HTML token measurement.
@@ -54,7 +57,7 @@ class M2M100Translator(Translator):
 
     @property
     def name(self) -> str:
-        return f"m2m100@{self._config.model_name}"
+        return f"{self._config.model_family}@{self._config.model_name}"
 
     @property
     def runtime_info(self) -> TranslationRuntimeInfo:
@@ -70,9 +73,13 @@ class M2M100Translator(Translator):
 
         return TranslationRuntimeInfo(
             model_name=self._config.model_name,
+            model_family=self._config.model_family,
             model_revision=self._config.model_revision,
+            source_language=self._config.source_language,
+            target_language=self._config.target_language,
             device=self._device_str,
             precision=self._precision_str,
+            dtype=self._precision_str,
             cuda_available=cuda_ok,
             gpu_name=gpu_name,
             ready=self._model is not None,
@@ -169,7 +176,7 @@ class M2M100Translator(Translator):
         """
         self._ensure_loaded()
         with self._lock:
-            self._tokenizer.src_lang = source_lang
+            self._adapter.configure_source_language(self._tokenizer, source_lang)
             return len(
                 self._tokenizer(text, truncation=False)["input_ids"]
             )
@@ -241,7 +248,7 @@ class M2M100Translator(Translator):
           configured root; if offline (local_files_only or downloads
           disabled), fails with an actionable cache-missing error and no
           network access.
-        - Verifies the resolved snapshot contains the files M2M100 requires
+        - Verifies the resolved snapshot contains the files the configured model requires
           before it can be reported ready.
 
         Raises:
@@ -329,6 +336,7 @@ class M2M100Translator(Translator):
             cache_dir=cache_root or "",
             cache_status=cache_status,
             offline=offline,
+            model_family=cfg.model_family,
         )
 
     @staticmethod
@@ -355,11 +363,10 @@ class M2M100Translator(Translator):
 
     def _load_model(self) -> None:
         import torch
-        from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
-
         device_str = self._resolve_device()
 
         if device_str.startswith("cuda"):
+            self._configure_cuda_reproducibility(torch)
             gpu_name = torch.cuda.get_device_name(self._config.cuda_device)
             logger.info("[INFO] Translation device: %s", device_str)
             logger.info("[INFO] GPU: %s", gpu_name)
@@ -379,23 +386,19 @@ class M2M100Translator(Translator):
         snapshot_path = resolved.snapshot_path
         # Both the tokenizer and the model load from the SAME resolved
         # snapshot for the SAME revision; no ambiguous remote identifier.
-        load_kwargs = {"local_files_only": self._offline}
-
         try:
-            tokenizer = M2M100Tokenizer.from_pretrained(
-                snapshot_path, **load_kwargs
-            )
+            tokenizer = self._adapter.load_tokenizer(snapshot_path, self._offline)
         except Exception as e:
             raise TranslationModelLoadError(
                 f"Failed to load tokenizer from {snapshot_path}: {e}"
             ) from e
 
-        tokenizer.src_lang = self._config.source_language
+        self._adapter.configure_source_language(
+            tokenizer, self._config.source_language
+        )
 
         try:
-            model = M2M100ForConditionalGeneration.from_pretrained(
-                snapshot_path, **load_kwargs
-            )
+            model = self._adapter.load_model(snapshot_path, self._offline)
         except Exception as e:
             raise TranslationModelLoadError(
                 f"Failed to load model from {snapshot_path}: {e}"
@@ -425,6 +428,16 @@ class M2M100Translator(Translator):
         logger.info("[INFO] Model ready (snapshot=%s, %s).",
                     snapshot_path, resolved.cache_status)
 
+    @staticmethod
+    def _configure_cuda_reproducibility(torch) -> None:
+        """Disable known CUDA variation without forcing unsupported kernels."""
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("highest")
+
     def _resolve_precision(self, model, device_str: str) -> str:
         """Apply precision strategy and return the effective precision name.
 
@@ -439,7 +452,7 @@ class M2M100Translator(Translator):
         return "float32"
 
     # ------------------------------------------------------------------
-    # Internal: batched inference (official M2M100 generation pattern)
+    # Internal: batched inference (adapter-owned generation pattern)
     # ------------------------------------------------------------------
 
     def _translate_impl(
@@ -452,20 +465,19 @@ class M2M100Translator(Translator):
     ) -> List[TranslationResult]:
         """Translate a chunk of texts in one GPU batch.
 
-        Uses the officially documented M2M100 pattern:
-        tokenizer.src_lang = source; tokenize; model.generate with
-        forced_bos_token_id = tokenizer.get_lang_id(target); batch_decode.
+        Uses the configured model-family adapter for language setup and generation.
         """
         import torch
 
         tokenizer = self._tokenizer
         model = self._model
         device_str = self._device_str
-        target_lang_id = tokenizer.get_lang_id(target_lang)
-
+        started = time.perf_counter()
         with self._lock, torch.inference_mode():
             # Atomic: set language + tokenize + generate + decode
-            tokenizer.src_lang = source_lang
+            source_lang = self._adapter.configure_source_language(
+                tokenizer, source_lang
+            )
 
             encoded = tokenizer(
                 list(texts),
@@ -485,12 +497,18 @@ class M2M100Translator(Translator):
             # The structured path validates budgets before generation; this
             # is the final hard guard (model context window minus target
             # budget). Plain text beyond the model window fails explicitly.
-            ceiling = model.config.max_position_embeddings - target_budget - 8
+            model_limit = getattr(
+                model.config, "max_position_embeddings", self._config.max_input_tokens
+            )
+            # Encoder-decoder models have independent encoder/decoder
+            # positions: NLLB's 1024-token encoder budget is not reduced by
+            # the decoder's 512-token generation budget.
+            ceiling = min(self._config.max_input_tokens, model_limit)
             if actual_tokens > ceiling:
                 raise TranslationInputError(
                     f"input exceeds model token budget: measured {actual_tokens} "
                     f"source tokens, ceiling {ceiling} "
-                    f"(max_position_embeddings={model.config.max_position_embeddings}, "
+                    f"(max_input_tokens={self._config.max_input_tokens}, "
                     f"target_budget={target_budget}); text was NOT truncated"
                 )
 
@@ -545,11 +563,10 @@ class M2M100Translator(Translator):
 
             # --- Diagnostics (debug): tokenizer output before moving ---
             logger.debug(
-                "DIAG source_lang=%s target_lang=%s forced_bos_token_id=%s "
+                "DIAG source_lang=%s target_lang=%s "
                 "input_ids=%s attention_mask=%s token_count=%s decoded_source=%r",
                 source_lang,
                 target_lang,
-                target_lang_id,
                 encoded["input_ids"].tolist(),
                 encoded.get("attention_mask").tolist()
                 if encoded.get("attention_mask") is not None else None,
@@ -567,7 +584,7 @@ class M2M100Translator(Translator):
             logger.debug(
                 "DIAG model_dtype=%s input_dtype=%s device=%s precision=%s "
                 "num_beams=%s max_new_tokens=%s length_penalty=%s early_stopping=%s "
-                "no_repeat_ngram_size=unset",
+                "no_repeat_ngram_size=%s",
                 next(model.parameters()).dtype,
                 encoded["input_ids"].dtype,
                 device_str,
@@ -576,20 +593,26 @@ class M2M100Translator(Translator):
                 gen_cfg.max_new_tokens,
                 gen_cfg.length_penalty,
                 gen_cfg.early_stopping,
+                gen_cfg.no_repeat_ngram_size,
             )
 
             generation_kwargs = {
                 **encoded,
-                "forced_bos_token_id": target_lang_id,
-                "max_new_tokens": target_budget,
-                "num_beams": num_beams,
+                **self._adapter.build_generation_kwargs(
+                    tokenizer,
+                    source_lang,
+                    target_lang,
+                    max_new_tokens=target_budget,
+                    num_beams=num_beams,
+                    do_sample=gen_cfg.do_sample,
+                    no_repeat_ngram_size=gen_cfg.no_repeat_ngram_size,
+                ),
                 "length_penalty": gen_cfg.length_penalty,
                 "early_stopping": (
                     gen_cfg.early_stopping if num_beams > 1 else False
                 ),
             }
-            # M2M100's generation config may carry max_length=200. Clear that
-            # legacy limit so the adaptive max_new_tokens policy is the sole
+            # Clear a legacy max_length so the adaptive max_new_tokens policy is the sole
             # length authority; passing a generation_config alongside explicit
             # generation arguments is deprecated by Transformers.
             model_generation_config = getattr(model, "generation_config", None)
@@ -597,6 +620,13 @@ class M2M100Translator(Translator):
                 model_generation_config, "max_length", None
             ) is not None:
                 model_generation_config.max_length = None
+            if not gen_cfg.do_sample:
+                # Beam search is configured without sampling, but resetting
+                # CUDA RNG state also removes backend tie-break variability
+                # across repeated calls through direct/API adapters.
+                torch.manual_seed(0)
+                if device_str.startswith("cuda"):
+                    torch.cuda.manual_seed_all(0)
             generated = model.generate(**generation_kwargs)
 
             # --- Diagnostics (debug): raw generated token IDs before decode ---
@@ -608,6 +638,7 @@ class M2M100Translator(Translator):
             decoded = tokenizer.batch_decode(
                 generated, skip_special_tokens=True
             )
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
         # Validate cardinality before any per-item quality inspection.
         if len(decoded) != len(texts):
@@ -615,6 +646,16 @@ class M2M100Translator(Translator):
                 f"model returned {len(decoded)} decoded outputs for "
                 f"{len(texts)} inputs"
             )
+
+        self._last_quality_diagnostics.update(
+            {
+                "output_token_count": sum(
+                    int(item.shape[0]) for item in generated
+                ),
+                "elapsed_ms": elapsed_ms,
+                "model_family": self._config.model_family,
+            }
+        )
 
         degenerate = [
             index

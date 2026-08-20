@@ -12,7 +12,6 @@ import pytest
 from image_translation.translation.base import Translator
 from image_translation.translation.chapter_chunking import collect_blocks
 from image_translation.translation.config import (
-    GlossaryEntry,
     StructuredConfig,
     TranslationConfig,
 )
@@ -24,7 +23,6 @@ from image_translation.translation.html_document import HTMLDocument
 from image_translation.translation.models import TranslationResult
 from image_translation.translation.structured_translation import StructuredTranslator
 
-import image_translation.translation.structured_translation as st_mod
 
 
 class FakeTranslator(Translator):
@@ -81,14 +79,6 @@ class FakeTranslator(Translator):
                     )
                 )
         return out
-
-
-@pytest.fixture(autouse=True)
-def fake_measure(monkeypatch):
-    class FakeTok:
-        def __call__(self, text, truncation=False):
-            return {"input_ids": list(range(max(1, (len(text) + 1) // 2)))}
-    monkeypatch.setattr(st_mod, "_get_measure_tokenizer", lambda *a, **k: FakeTok())
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +201,7 @@ class TestMixedGrouping:
                     ))
                 return out
 
-        cfg = StructuredConfig(glossary=(
-            GlossaryEntry("充电器", "Charger"),
-        ))
+        cfg = StructuredConfig()
         html = (
             "<p>Please click the button 请继续。</p>"                     # ordinary English
             "<p>请 <strong>click</strong> 这里 <em>now</em> 谢谢。</p>"    # English around inline tags
@@ -222,7 +210,7 @@ class TestMixedGrouping:
             "<p>联系 support@example.com 获取帮助。</p>"                 # email
             "<p>电缆长度 1.5 meters 支持 20V/5A 快充。</p>"              # measurements
             "<p>支持 Windows 11 和 iPhone 16 Pro。</p>"                  # versions
-            "<p>本充电器支持快充协议。</p>"                              # glossary term
+            "<p>本充电器支持快充协议。</p>"
         )
         res = StructuredTranslator(TotalCorruptionFake(), cfg, None).translate(html)
         out = res.translated_html
@@ -240,17 +228,16 @@ class TestMixedGrouping:
             "20V/5A",
             "Windows 11",
             "iPhone 16 Pro",
-            "Charger",          # glossary target
         ):
             assert expected in out, f"{expected!r} missing in {out!r}"
         # Chinese translated in place
         assert "EN:" in out
 
-    def test_identifier_and_glossary_target_changes_restored(self):
-        """Adversarial fake emits changed identifier/glossary-looking text in
+    def test_identifier_changes_are_restored(self):
+        """Adversarial fake emits changed identifier-looking text in
         every slot: protected originals must be restored exactly and the
-        model's attempts can never REPLACE them (identifiers and glossary
-        targets never reach the model as free text)."""
+        model's attempts can never REPLACE them (protected identifiers never
+        reach the model as free text)."""
         class OverrideFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
                                       target_lang="en", max_new_tokens=None):
@@ -271,7 +258,7 @@ class TestMixedGrouping:
                     ))
                 return out
 
-        cfg = StructuredConfig(glossary=(GlossaryEntry("充电器", "Charger"),))
+        cfg = StructuredConfig()
         html = (
             "<p>型号 ABC-123 已发货，充电器支持快充。</p>"
             "<p>访问 https://example.com 获取信息，本充电器兼容 Windows 11。</p>"
@@ -282,7 +269,6 @@ class TestMixedGrouping:
         assert out.count("ABC-123") == 1
         assert out.count("https://example.com") == 1
         assert out.count("Windows 11") == 1
-        assert out.count("Charger") == 2
         # no placeholder token may leak into the output
         assert "__ITRANSLATE" not in out
 
@@ -376,7 +362,7 @@ class TestLanguagePropagation:
 class TestNoTruncation:
     def test_translator_rejects_over_budget_plain_input(self):
         """Plain-path hard guard: over-budget input raises, never truncates."""
-        from image_translation.translation.m2m100_translator import M2M100Translator
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
 
         class FakeIds:
             def __init__(self, n):
@@ -397,7 +383,7 @@ class TestNoTruncation:
                     "attention_mask": FakeIds(n),
                 }
 
-            def get_lang_id(self, lang):
+            def convert_tokens_to_ids(self, lang):
                 return 1
 
             def batch_decode(self, ids, skip_special_tokens=False):
@@ -406,7 +392,7 @@ class TestNoTruncation:
         class FakeModel:
             config = type("C", (), {"max_position_embeddings": 1024})()
 
-        t = M2M100Translator(TranslationConfig())
+        t = Seq2SeqTranslator(TranslationConfig(max_input_tokens=768))
         t._model = FakeModel()
         t._tokenizer = FakeTok()
         t._device_str = "cpu"
@@ -436,7 +422,7 @@ class TestNoTruncation:
 
     def test_no_truncation_in_source(self):
         """Static guard: the translator module must not call truncation=True."""
-        src = open("src/image_translation/translation/m2m100_translator.py",
+        src = open("src/image_translation/translation/seq2seq_translator.py",
                    encoding="utf-8").read()
         assert "truncation=True" not in src
 

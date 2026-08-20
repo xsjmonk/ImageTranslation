@@ -21,7 +21,6 @@ from image_translation.translation.exceptions import StructuredTranslationError
 from image_translation.translation.models import TranslationResult
 from image_translation.translation.structured_translation import StructuredTranslator
 
-import image_translation.translation.structured_translation as st_mod
 
 # Matches every placeholder token the project can produce (default + retry
 # prefixes): __IT<prefix>_<KIND><4 digits>_
@@ -203,14 +202,6 @@ class SlotCorruptingFake(Translator):
             return rebuild(tokens + [tokens[0]])
 
         return text
-
-
-@pytest.fixture(autouse=True)
-def fake_measure(monkeypatch):
-    class FakeTok:
-        def __call__(self, text, truncation=False):
-            return {"input_ids": list(range(max(1, (len(text) + 1) // 2)))}
-    monkeypatch.setattr(st_mod, "_get_measure_tokenizer", lambda *a, **k: FakeTok())
 
 
 def _run(mode: str, html: str = SLOT_HTML):

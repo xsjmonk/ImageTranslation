@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Start the M2M100 GPU translation server with a live status panel.
+    Start the NLLB GPU translation server with a live status panel.
 
 .DESCRIPTION
     Launches the translation server using the existing 'dp' Conda
@@ -68,8 +68,13 @@ $ServerHost = '127.0.0.1'
 $ServerPort = 8091
 $ServerWorkers = 1
 $ServerLogLevel = 'info'
-$ModelName = 'facebook/m2m100_418M'
+$ModelName = 'facebook/nllb-200-distilled-600M'
+$ModelFamily = 'nllb'
+$SourceLanguage = 'zho_Hans'
+$TargetLanguage = 'eng_Latn'
+$ModelCacheDir = './models'
 $ModelDevice = 'cuda'
+$Precision = 'auto'
 $WarmupOnStart = $true
 try {
     $ConfigJson = Get-Content -Raw -Path $ConfigPath | ConvertFrom-Json
@@ -78,7 +83,13 @@ try {
     if ($ConfigJson.server.workers)     { $ServerWorkers = [int]$ConfigJson.server.workers }
     if ($ConfigJson.server.log_level)   { $ServerLogLevel = [string]$ConfigJson.server.log_level }
     if ($ConfigJson.translation.model_name) { $ModelName = [string]$ConfigJson.translation.model_name }
+    if ($ConfigJson.translation.model_family) { $ModelFamily = [string]$ConfigJson.translation.model_family }
+    if ($ConfigJson.translation.source_language) { $SourceLanguage = [string]$ConfigJson.translation.source_language }
+    if ($ConfigJson.translation.target_language) { $TargetLanguage = [string]$ConfigJson.translation.target_language }
+    if ($ConfigJson.server.model_cache_dir) { $ModelCacheDir = [string]$ConfigJson.server.model_cache_dir }
+    else { $ModelCacheDir = 'D:\Caches\' }
     if ($ConfigJson.translation.device)     { $ModelDevice = [string]$ConfigJson.translation.device }
+    if ($ConfigJson.translation.precision)  { $Precision = [string]$ConfigJson.translation.precision }
     if ($null -ne $ConfigJson.runtime.warmup_on_start) { $WarmupOnStart = [bool]$ConfigJson.runtime.warmup_on_start }
 }
 catch {
@@ -116,7 +127,11 @@ if ($LanUrls.Count -gt 0) {
 Write-Host "[STATUS] Workers:     $ServerWorkers"
 Write-Host "[STATUS] Log level:   $ServerLogLevel"
 Write-Host "[STATUS] Model:       $ModelName"
+Write-Host "[STATUS] Family:      $ModelFamily"
+Write-Host "[STATUS] Languages:   $SourceLanguage -> $TargetLanguage"
+Write-Host "[STATUS] Cache:       $ModelCacheDir"
 Write-Host "[STATUS] Device:      $ModelDevice"
+Write-Host "[STATUS] Precision:   $Precision"
 Write-Host "[STATUS] Warmup:      $(if ($WarmupOnStart) { 'on start' } else { 'lazy (first request)' })"
 Write-Host ""
 
@@ -168,7 +183,17 @@ if (-not $CondaExe -or -not (Test-Path $CondaExe)) {
 
 # Prefer the environment's python directly (no conda-run output buffering);
 # fall back to `conda run --no-capture-output` if it is missing.
-$CondaRoot = Split-Path -Parent (Split-Path -Parent $CondaExe)
+$CondaExePath = [System.IO.Path]::GetFullPath($CondaExe)
+$CondaParent = Split-Path -Parent $CondaExePath
+if ((Split-Path -Leaf $CondaParent) -eq 'bin' -and
+    (Split-Path -Leaf (Split-Path -Parent $CondaParent)) -eq 'Library') {
+    # conda.bat discovered through the Miniconda Library\bin shim
+    $CondaRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $CondaExePath))
+}
+else {
+    # Standard Scripts\conda.exe installation
+    $CondaRoot = Split-Path -Parent $CondaParent
+}
 $EnvPython = Join-Path $CondaRoot "envs\dp\python.exe"
 if (Test-Path $EnvPython) {
     $LaunchCmd = $EnvPython
@@ -194,7 +219,7 @@ if ($LanUrls.Count -gt 0) {
 else {
     Write-Host "[INFO] Launching translation server on $ServerUrl ..." -ForegroundColor Green
 }
-Write-Host "[INFO] First launch may download the model (~1.7 GB). Subsequent starts are fast."
+Write-Host "[INFO] First launch may download the configured model. Subsequent starts reuse the cache."
 Write-Host "[INFO] Press Ctrl+C to stop the server."
 Write-Host ""
 
@@ -220,16 +245,15 @@ function Get-ServerStateText {
     if ($ModelReady) { return 'state RUNNING (model ready)' }
     if ($HealthOk) { return 'state RUNNING (model loading ...)' }
     # Tail the server log to detect an in-progress model download
-    # (translator logs 'Model cache MISS; downloading ...' and HF logs
-    # 'Fetching N files' / 'Downloading ...'; 'Model download COMPLETE'
-    # marks the end of the download phase).
+    # (the translator and Hugging Face logs report download progress;
+    # 'Model download COMPLETE' marks the end of the download phase).
     $log = ''
     if (Test-Path $ErrLog) {
         $log = (Get-Content -Tail 40 $ErrLog -ErrorAction SilentlyContinue) -join "`n"
     }
     if ($log -match 'Model download COMPLETE') { return 'state model download complete; loading model ...' }
     if ($log -match 'downloading|Fetching \d+ files|Downloading') {
-        return 'state DOWNLOADING model (first launch, ~1.7 GB) ...'
+        return 'state DOWNLOADING configured model ...'
     }
     return 'state starting ...'
 }
@@ -250,12 +274,16 @@ try {
 
         $stateText = Get-ServerStateText -HealthOk $healthOk -ModelReady $modelReady
         $line = "[STATUS] uptime ${uptime}s | port $ServerPort | $stateText" +
-                $(if ($modelReady) { " | $($health.model) | $($health.device)" } else { '' })
+                $(if ($modelReady) {
+                    " | $($health.model_family) $($health.model) | " +
+                    "$($health.source_language)->$($health.target_language) | " +
+                    "$($health.device) $($health.precision) | cache $($health.cache_dir)"
+                } else { '' })
 
         if ($modelReady -and -not $readySeen) {
             $readySeen = $true
             $secs = [int](New-TimeSpan -Start $startTime -End (Get-Date)).TotalSeconds
-            Write-Host "[OK]   Server RUNNING on $ServerUrl (PID $($proc.Id), model $($health.model), device $($health.device), ready in ${secs}s)" -ForegroundColor Green
+            Write-Host "[OK]   Server RUNNING on $ServerUrl (PID $($proc.Id), model $($health.model), family $($health.model_family), device $($health.device), precision $($health.precision), ready in ${secs}s)" -ForegroundColor Green
         }
         elseif ($uptime -ge ($lastStatusLine + $StatusInterval)) {
             # Periodic status refresh (every 4 min)

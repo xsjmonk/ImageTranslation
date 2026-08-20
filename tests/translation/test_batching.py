@@ -25,7 +25,6 @@ from image_translation.translation.exceptions import StructuredTranslationError
 from image_translation.translation.models import TranslationResult
 from image_translation.translation.structured_translation import StructuredTranslator
 
-import image_translation.translation.structured_translation as st_mod
 
 _TOKEN_RE = r"__IT[A-Z0-9]*_[A-Z]\d{4}_"
 
@@ -153,14 +152,6 @@ class RecordingFake(Translator):
         if self.mode == "invent":
             return text + "__ITRANSLATE_X9999_"
         return text
-
-
-@pytest.fixture(autouse=True)
-def fake_measure(monkeypatch):
-    class FakeTok:
-        def __call__(self, text, truncation=False):
-            return {"input_ids": list(range(max(1, (len(text) + 1) // 2)))}
-    monkeypatch.setattr(st_mod, "_get_measure_tokenizer", lambda *a, **k: FakeTok())
 
 
 MIXED_CHAPTER = """<h1>产品介绍</h1>

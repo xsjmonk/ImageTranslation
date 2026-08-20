@@ -115,7 +115,7 @@ Tests cover input resolution, config validation, enumeration, JSON utilities, cl
 
 ## Translation Server (standalone GPU API)
 
-A standalone FastAPI server exposes the M2M100 zh→en translator over HTTP.
+A standalone FastAPI server exposes the local NLLB zh→en translator over HTTP.
 
 ### Start the server
 
@@ -156,9 +156,7 @@ top-level `quality` section:
 
 ```json
 "quality": {
-  "unknown_token_policy": "warn",
-  "glossary_file": "src/image_translation/config/glossary.tsv",
-  "glossary_required": true
+  "unknown_token_policy": "warn"
 }
 ```
 
@@ -169,44 +167,40 @@ target budget from measured source tokens, caps compact inputs at
 when repeated or unbounded output is detected. A second failure is discarded
 and reported as a quality error; repeated text is never returned as success.
 
-Plain and HTML translation share one glossary loaded once at server startup
-from `src/image_translation/config/glossary.tsv`. The file is UTF-8
-tab-delimited, supports a BOM, and has the header `source<TAB>target<TAB>exact`.
-Malformed, duplicate, overlapping, or invalid rows fail configuration loading.
-When `glossary_required` is false, a missing file produces a warning and an
-empty glossary.
-
-The legacy `structured.glossary` JSON array is rejected; migrate it to the
-TSV file instead.
-
 ### Model cache location and offline mode
 
-The model download location is configurable under `translation`:
+The model download location is a server deployment setting:
 
 ```json
+"server": {
+  "model_cache_dir": "D:\\Caches\\"
+},
 "translation": {
-  "model_name": "facebook/m2m100_418M",
+  "model_name": "facebook/nllb-200-distilled-600M",
+  "model_family": "nllb",
   "model_revision": "main",
-  "model_cache_dir": "D:/Models/ImageTranslation/huggingface",
+  "source_language": "zho_Hans",
+  "target_language": "eng_Latn",
   "allow_model_download": true,
   "local_files_only": false
 }
 ```
 
-- **Default behavior**: `model_cache_dir` omitted/empty → the Hugging Face default cache is used (backward compatible). `model_cache_dir` is a Hugging Face **cache root** (HF creates its normal `models--<org>--<name>` structure below it), not an arbitrary renamed snapshot directory.
+- **Default behavior**: `server.model_cache_dir` omitted/empty resolves to the explicit absolute directory `D:\Caches\`. Hugging Face creates its normal `models--<org>--<name>` structure below that root.
 - **Path resolution**: environment variables are expanded (`%VAR%` / `${VAR}`); relative paths resolve against the directory containing the config file (never the current working directory); the final absolute path is logged at startup.
-- **Shared cache**: point several machines at one writable cache root (e.g. `D:/Models/ImageTranslation/huggingface`). When the configured cache is set it is the **authoritative** location — the implementation never silently falls back to the default cache.
+- **Shared cache**: point several machines at one writable cache root. The server-owned path is authoritative — the implementation never silently falls back to the user cache.
 - **Pre-download** (one-time, on any machine with network):
 
   ```powershell
-  conda run -n dp python -c "from huggingface_hub import snapshot_download; print(snapshot_download('facebook/m2m100_418M', revision='main', cache_dir='D:/Models/ImageTranslation/huggingface'))"
+  conda run -n dp python -c "from huggingface_hub import snapshot_download; print(snapshot_download('facebook/nllb-200-distilled-600M', revision='main', cache_dir=r'D:\Caches'))"
   ```
 
   or simply start the server once with `allow_model_download: true` — the first warmup downloads and logs `Model download COMPLETE`.
 - **Fully offline** after pre-download: set `"allow_model_download": false, "local_files_only": true`. Startup then resolves and loads only from the configured cache; a missing/incomplete model fails with an actionable error and never touches the network, never falls back to another cache, and never silently switches to CPU. Contradictory `local_files_only: true` + `allow_model_download: true` is rejected at config validation.
 - **Verify the resolved path**: startup logs `Model cache HIT (reused): <snapshot>` or `Model download COMPLETE: <snapshot>`, and `GET /health` returns `cache_dir`, `snapshot_path`, `cache_status` (`cache_hit`/`download`), `model_revision`, `local_files_only`, `offline` (effective mode), plus the existing `device`/`ready` fields.
 - **HTML measurement**: long-HTML segment-size measurement uses the **exact tokenizer loaded for inference** (same resolved snapshot, revision, and cache policy, `truncation=False`). No second tokenizer is constructed and no independent Hugging Face access happens after the model is loaded — offline mode is honored by HTML translation too.
-- **Permissions and disk**: the model is ~2.5 GB; the cache root must be writable (the configured directory is created if its parent is valid). Incomplete snapshots are detected before the server reports ready.
+- **Permissions and disk**: the NLLB model is large; the configured cache root must already exist and be writable. Incomplete snapshots are detected before the server reports ready.
+- **License**: NLLB is licensed CC-BY-NC-4.0. Set `commercial_use: true` only with the explicitly configured `Helsinki-NLP/opus-mt-zh-en` alternative (`model_family: "helsinki"`); NLLB is rejected in commercial mode rather than silently replaced.
 
 ### Long-running requests
 
@@ -255,7 +249,7 @@ Behavior contract (documented):
 - Blocks that are entirely English-only are never sent to the model (byte-identical).
 - `translate="no"` attributes, `notranslate` classes, and `<script>/<style>/<code>/<pre>` subtrees are never sent to the model; their content must be byte-identical after translation or the request fails closed.
 - Chapters larger than 4,000 characters are segmented (sentence → clause → hard split) with a real tokenizer (truncation=False); nothing is silently truncated — over-budget plain input is rejected with a clear error.
-- Every placeholder must appear exactly once, in EXACT source order — the complete protected-token sequence in the model output (tags, entities, bare-ampersand runs, English spans, identifiers/model numbers/SKUs/URLs/emails/versions, glossary terms) must equal the source `placeholder_order` precisely. Reordering within a tag interval is rejected: protected content stays in its original source slot. Model-invented placeholder-like tokens (default or retry prefixes, unregistered) are rejected. Failures retry with a stricter placeholder prefix, then fall back to per-chinese-run translation (which restores protected content from the source map in source order); if that still fails, the request errors rather than returning corrupted HTML — never partial output.
+- Every placeholder must appear exactly once, in EXACT source order — the complete protected-token sequence in the model output (tags, entities, bare-ampersand runs, English spans, identifiers/model numbers/SKUs/URLs/emails/versions) must equal the source `placeholder_order` precisely. Reordering within a tag interval is rejected: protected content stays in its original source slot. Model-invented placeholder-like tokens (default or retry prefixes, unregistered) are rejected. Failures retry with a stricter placeholder prefix, then fall back to per-chinese-run translation (which restores protected content from the source map in source order); if that still fails, the request errors rather than returning corrupted HTML — never partial output.
 - Reconstruction is driven by explicit run metadata (node id, kind, raw text, character offsets, slot index) with build-time coverage invariants (concatenated runs == block text; offsets contiguous; every node covered exactly once); model-output pieces map onto recorded slots strictly positionally from the validated exact placeholder sequence, never by string splitting.
 - The request's `source_language`/`target_language` propagate to every model call (`forced_bos_token_id` is resolved from the target language); language pairs are not hardcoded.
 - `translatable_attributes` values are translated as segments; URL/code/style attributes are never in the allowlist and are never translated.
@@ -282,7 +276,7 @@ Structured configuration (`structured` section in `translation-server.config.jso
 
 Notes:
 - `batch_size` — segments are grouped into bounded first-pass batches (source order preserved) and each batch is sent to the shared translator's `translate_batch_texts()` **once**. Groups are formed by (language pair, **quantized target-budget bucket** — `64, 128, 192, 256, 320, 400`), so short segments never run with an unnecessarily large `max_new_tokens`; the batch budget is the bucket, which is **never below** any member's required budget (never lowered, never truncated). Every result is validated independently with the strict complete placeholder sequence, and only failed items are retried individually (stricter prefix → split fallback → fail closed). Batch **cardinality is checked explicitly** after every call — zero/fewer/extra/None/malformed results are never silently zipped away; affected segments are recovered individually or the request fails closed. No concurrent model calls (`concurrency=1` default). Metrics distinguish `sum_requested_target_tokens` (per-segment required budgets) from `batch_generation_budget` (bucket × items actually passed to the model) and record per-batch `batch_metrics` (items, max budget, per-segment budgets/buckets, source tokens, elapsed).
-- `context_window_tokens: 0` — context injection is **not implemented** (M2M100's `generate()` has no reliable context API) and this value is reserved; it MUST stay 0. Segment adjacency is recorded for diagnostics only, not as context. Terminology consistency across segments is guaranteed for protected terms (identifiers/English restore identical text); for translatable Chinese terms it depends on model determinism (fixed beams → deterministic output for identical input).
+- `context_window_tokens: 0` — context injection is not implemented by the supported model families and this value is reserved; it MUST stay 0. Segment adjacency is recorded for diagnostics only, not as context.
 - **Inline-code extraction (exact lexical preservation)**: before parsing, a lexical scanner replaces every character reference (`&nbsp;`, `&#160;`, `&#xA0;`, `&amp;`, `&lt;br&gt;`, ...) and every bare `&` with a collision-resistant sentinel; tags are also recorded in their exact source spelling. Entities/tags therefore NEVER reach the model as free text — they are restored from the source map by stable IDs after translation. Guarantees:
   - `&nbsp;`, `&#160;`, and `&#xA0;` keep their distinct, exact spellings (never decoded/normalized);
   - `&lt;br&gt;` stays literal text — it can never become a real `<br>` element;
@@ -291,10 +285,8 @@ Notes:
   - model-emitted `&nbsp;`-like text is escaped to `&amp;nbsp;` on output (text, never an entity).
   - **Normalization boundary** (documented): malformed input (implied/stray tags) falls back to the parser's canonical tag form; attribute values of *translated* attributes are re-serialized canonically (translatable attributes default to none); script/style content is always byte-identical.
 - **`preserve_patterns`**: configurable regex list for project-specific model formats/product codes (e.g. `["^[A-Z]{2,}/\\d{4}$"]`). Matches in non-Chinese spans become `model_number_protected` runs — preserved exactly, never rewritten by the model. Applied on top of the built-in identifier rules (URLs, emails, codes, measurements, versions); invalid patterns raise a configuration error.
-- **Terminology memory (glossary)**: the startup-loaded TSV glossary is injected into the structured orchestration. Entries are replaced with protected placeholders BEFORE inference and restored to exact target terms afterwards — the same term maps to the same target in EVERY segment. `exact: true` never matches inside a latin word (`cat` ≠ `catalog`); CJK ideograph neighbors are accepted. Protected identifiers (URLs, codes) always win over glossary terms.
-- Repeated Chinese terms (CJK bigrams/trigrams, ≥3 occurrences) are collected and reported in the metrics for review; they are informational — only configured glossary entries drive replacement.
-- `context_window_tokens` is **explicitly unsupported**: non-zero values raise a configuration error. M2M100's `generate()` has no reliable context API; segment adjacency ids are diagnostics only and are never sent to the model.
-- Machine-readable metrics: the structured result exposes `to_dict()` (segment count, source tokens, target budgets, protected-run count, terminology occurrences with segment ids, repeated terms, elapsed time, retry/fallback counts, validation status) — emitted as JSON by the GPU quality gate.
+- `context_window_tokens` is **explicitly unsupported**: non-zero values raise a configuration error; segment adjacency ids are diagnostics only and are never sent to the model.
+- Machine-readable metrics: the structured result exposes `to_dict()` (segment count, source tokens, target budgets, protected-run count, repeated terms, elapsed time, retry/fallback counts, validation status).
 - `translatable_attributes` is an allowlist of human-readable attribute values that may be translated, e.g. `["alt", "title", "aria-label"]` (empty = none).
 - `segment_warning_seconds` is a **warning threshold only** — a slow segment logs a warning but is never cancelled.
 - `max_total_seconds` is a **real deadline** enforced between segments — an in-flight segment is not interruptible; once it returns, work stops and the request fails with a clear error and no partial output.

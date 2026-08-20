@@ -29,13 +29,13 @@ class TestLoadServerConfig:
                 "server": {"host": "127.0.0.1", "port": 9000},
                 "runtime": {"warmup_on_start": False},
                 "structured": {"preserve_patterns": ["^[A-Z]{2,}/\\d{4}$"]},
-                "translation": {"model_name": "facebook/m2m100_418M"},
+                "translation": {"model_name": "facebook/nllb-200-distilled-600M"},
             },
         )
         cfg = load_server_config(cfg_path)
         assert cfg.server.port == 9000
         assert cfg.runtime.warmup_on_start is False
-        assert cfg.translation.model_name == "facebook/m2m100_418M"
+        assert cfg.translation.model_name == "facebook/nllb-200-distilled-600M"
         assert cfg.structured.preserve_patterns == ("^[A-Z]{2,}/\\d{4}$",)
 
     def test_quality_and_generation_policy_load(self, tmp_path):
@@ -62,32 +62,6 @@ class TestLoadServerConfig:
             {"quality": {"unknown_token_policy": "replace"}},
         )
         with pytest.raises(ValueError, match="unknown_token_policy"):
-            load_server_config(cfg_path)
-
-    def test_glossary_path_resolves_from_config_directory(self, tmp_path):
-        glossary = tmp_path / "terms.tsv"
-        glossary.write_text(
-            "source\ttarget\texact\n蔡司\tZeiss\ttrue\n",
-            encoding="utf-8",
-        )
-        cfg_path = _write_config(
-            tmp_path,
-            {
-                "quality": {
-                    "glossary_file": "terms.tsv",
-                    "glossary_required": True,
-                }
-            },
-        )
-        cfg = load_server_config(cfg_path)
-        assert Path(cfg.translation.quality.glossary_file) == glossary.resolve()
-
-    def test_legacy_json_glossary_rejected(self, tmp_path):
-        cfg_path = _write_config(
-            tmp_path,
-            {"structured": {"glossary": []}},
-        )
-        with pytest.raises(ValueError, match="quality.glossary_file"):
             load_server_config(cfg_path)
 
     def test_missing_explicit_config_fails(self, tmp_path):
@@ -180,18 +154,22 @@ class TestServerConfigValidation:
 
 class TestModelCacheConfig:
     def test_absolute_cache_dir_preserved_and_normalized(self, tmp_path):
+        cache = tmp_path / "hf"
+        cache.mkdir()
         cfg_path = _write_config(
             tmp_path,
-            {"translation": {"model_cache_dir": "D:/Models/ImageTranslation/hf"}},
+            {"server": {"model_cache_dir": str(cache)}},
         )
         cfg = load_server_config(cfg_path)
         assert Path(cfg.translation.model_cache_dir) == \
-            Path("D:/Models/ImageTranslation/hf").resolve()
+            cache.resolve()
+        assert Path(cfg.server.model_cache_dir) == cache.resolve()
 
     def test_relative_cache_dir_resolves_against_config_dir(self, tmp_path):
+        (tmp_path / "models" / "hf-cache").mkdir(parents=True)
         cfg_path = _write_config(
             tmp_path,
-            {"translation": {"model_cache_dir": "models/hf-cache"}},
+            {"server": {"model_cache_dir": "models/hf-cache"}},
         )
         cfg = load_server_config(cfg_path)
         assert Path(cfg.translation.model_cache_dir) == \
@@ -199,18 +177,20 @@ class TestModelCacheConfig:
 
     def test_env_var_expansion_in_cache_dir(self, tmp_path, monkeypatch):
         monkeypatch.setenv("IT_TEST_CACHE", "expanded-cache")
+        (tmp_path / "expanded-cache" / "hf").mkdir(parents=True)
         cfg_path = _write_config(
             tmp_path,
-            {"translation": {"model_cache_dir": "${IT_TEST_CACHE}/hf"}},
+            {"server": {"model_cache_dir": "${IT_TEST_CACHE}/hf"}},
         )
         cfg = load_server_config(cfg_path)
         assert Path(cfg.translation.model_cache_dir) == \
             (tmp_path / "expanded-cache" / "hf").resolve()
 
-    def test_omitted_cache_dir_defaults_to_none(self, tmp_path):
+    def test_omitted_cache_dir_defaults_to_absolute_caches(self, tmp_path):
         cfg_path = _write_config(tmp_path, {"translation": {}})
         cfg = load_server_config(cfg_path)
-        assert cfg.translation.model_cache_dir is None
+        assert cfg.server.model_cache_dir == r"D:\Caches"
+        assert cfg.translation.model_cache_dir == r"D:\Caches"
         assert cfg.translation.model_revision == "main"
         assert cfg.translation.allow_model_download is True
         assert cfg.translation.local_files_only is False
@@ -248,7 +228,40 @@ class TestModelCacheConfig:
         target = tmp_path / "not-a-dir"
         target.write_text("x", encoding="utf-8")
         cfg_path = _write_config(
-            tmp_path, {"translation": {"model_cache_dir": str(target)}}
+            tmp_path, {"server": {"model_cache_dir": str(target)}}
         )
-        with pytest.raises(ValueError, match="not a directory"):
+        with pytest.raises(ValueError, match="existing directory"):
             load_server_config(cfg_path)
+
+    def test_model_name_does_not_change_server_cache_root(self, tmp_path):
+        cache = tmp_path / "shared"
+        cache.mkdir()
+        first_dir = tmp_path / "first"
+        first_dir.mkdir()
+        first = load_server_config(_write_config(
+            first_dir,
+            {"server": {"model_cache_dir": str(cache)},
+             "translation": {"model_name": "facebook/nllb-200-distilled-600M"}},
+        ))
+        second_dir = tmp_path / "second"
+        second_dir.mkdir()
+        second = load_server_config(_write_config(
+            second_dir,
+            {"server": {"model_cache_dir": str(cache)},
+             "translation": {
+                 "model_name": "Helsinki-NLP/opus-mt-zh-en",
+                 "model_family": "helsinki",
+             }},
+        ))
+        assert first.server.model_cache_dir == second.server.model_cache_dir
+        assert first.translation.model_cache_dir == second.translation.model_cache_dir
+
+    def test_legacy_translation_cache_is_normalized_to_server_owner(self, tmp_path):
+        cache = tmp_path / "legacy-cache"
+        cache.mkdir()
+        cfg = load_server_config(_write_config(
+            tmp_path,
+            {"translation": {"model_cache_dir": str(cache)}},
+        ))
+        assert cfg.server.model_cache_dir == str(cache.resolve())
+        assert cfg.translation.model_cache_dir == cfg.server.model_cache_dir

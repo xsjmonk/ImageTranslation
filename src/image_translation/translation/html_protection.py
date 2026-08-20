@@ -76,7 +76,7 @@ class ProtectionMap:
         - the complete known-placeholder sequence in the model output must
           equal ``expected_order`` EXACTLY — tags, entities, bare-ampersand
           runs, English spans, identifiers/model numbers/SKUs/URLs/emails/
-          versions, and glossary/protected terms included. Reordering within
+          versions and protected terms included. Reordering within
           a tag interval is REJECTED: protected content must stay in its
           original source slot;
         - any missing, duplicated, altered, or unknown placeholder is

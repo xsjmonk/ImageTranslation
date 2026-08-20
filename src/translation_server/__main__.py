@@ -11,7 +11,7 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="translation_server",
-        description="Standalone M2M100 GPU translation API server",
+        description="Standalone NLLB GPU translation API server",
     )
     parser.add_argument(
         "-c", "--config",

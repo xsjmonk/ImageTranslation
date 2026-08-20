@@ -24,10 +24,10 @@ class TranslateRequest(BaseModel):
         "plain", description="plain (default, backward compatible) or html"
     )
     source_language: Optional[str] = Field(
-        None, description="Optional source language code (default: zh)"
+        None, description="Optional source language code; defaults to server configuration"
     )
     target_language: Optional[str] = Field(
-        None, description="Optional target language code (default: en)"
+        None, description="Optional target language code; defaults to server configuration"
     )
 
 
@@ -40,9 +40,13 @@ class HealthResponse(BaseModel):
     """GET /health response (backward compatible; extra fields allowed)."""
     status: str = "ok"          # ok | starting
     model: str = ""
+    model_family: str = ""
     model_revision: str = ""
+    source_language: str = ""
+    target_language: str = ""
     device: str = ""
     precision: str = ""
+    dtype: str = ""
     ready: bool = False
     cache_dir: str = ""
     snapshot_path: str = ""

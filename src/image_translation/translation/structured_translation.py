@@ -31,7 +31,7 @@ Protected-span strategy (documented): ordinary English and identifiers are
 replaced with collision-resistant placeholders BEFORE inference and restored
 from the ORIGINAL text afterwards. The model can never rewrite, drop, or
 paraphrase English — exact preservation does not depend on post-hoc
-detection. Context is NOT supplied to the model: M2M100's generate() has no
+detection. Context is NOT supplied to the model: the configured sequence-to-sequence model's generate() has no
 reliable context-injection API, so context_window_tokens is reserved and
 MUST stay 0. Terminology consistency across segments is guaranteed for
 protected terms; for translatable Chinese terms it depends on deterministic
@@ -50,14 +50,13 @@ from typing import Dict, List, Optional
 from .base import Translator
 from .chapter_chunking import (
     RUN_ATTRIBUTE,
-    RUN_GLOSSARY,
     RUN_IDENTIFIER,
     RUN_TAG,
     Segment,
     collect_blocks,
     segment_blocks,
 )
-from .config import GlossaryEntry, StructuredConfig, TranslationConfig
+from .config import StructuredConfig, TranslationConfig
 from .exceptions import (
     BatchItemError,
     StructuredTranslationError,
@@ -69,8 +68,6 @@ from .language_segments import LanguageKind, classify, protect_identifiers
 from .reconstruction import rebuild_document
 
 logger = logging.getLogger(__name__)
-
-_tokenizer_cache: Dict[tuple, object] = {}
 
 # Documented quantized target-budget buckets. Segments are grouped by
 # (language pair, bucket(required_budget)); the batch's max_new_tokens is
@@ -148,7 +145,7 @@ def _collect_repeated_terms(
     """Repeated CJK bigrams/trigrams in TRANSLATABLE text (informational).
 
     Excluded content is never scanned. Reported terms are NOT replaced —
-    only configured glossary entries drive replacement.
+    only configured protected terminology entries drive replacement.
     """
     from collections import Counter
 
@@ -169,29 +166,6 @@ def _collect_repeated_terms(
     }
 
 
-def _collect_glossary_occurrences(segments: List[Segment]) -> dict:
-    """Terminology memory record: glossary term -> {target, exact,
-    occurrences, segments[]}. Grouped by run.raw (the source term)."""
-    result: Dict[str, dict] = {}
-    for seg in segments:
-        for run in seg.runs:
-            if run.kind != RUN_GLOSSARY:
-                continue
-            info = result.setdefault(
-                run.raw,
-                {
-                    "target": run.restore_text,
-                    "exact": True,
-                    "occurrences": 0,
-                    "segments": [],
-                },
-            )
-            info["occurrences"] += 1
-            if seg.segment_id not in info["segments"]:
-                info["segments"].append(seg.segment_id)
-    return result
-
-
 def _collect_identifier_occurrences(segments: List[Segment], cap: int = 50) -> dict:
     """Protected identifier record: content -> {occurrences, segments[]}
     (identifiers are exact by construction; recorded for audit)."""
@@ -210,26 +184,6 @@ def _collect_identifier_occurrences(segments: List[Segment], cap: int = 50) -> d
     if len(result) > cap:
         return dict(list(result.items())[:cap])
     return result
-
-
-def _get_measure_tokenizer(model_name: str, model_cache_dir: Optional[str]):
-    """TEST-ONLY compatibility helper (tokenizer construction for direct
-    segment_blocks() tests).
-
-    Production HTML translation measures tokens through
-    ``Translator.measure_source_tokens()`` — the EXACT tokenizer loaded for
-    inference (authoritative cache policy, revision, resolved snapshot).
-    This helper is retained only for tests that exercise segmentation
-    directly and must not be used by the production path.
-    """
-    key = (model_name, model_cache_dir)
-    if key not in _tokenizer_cache:
-        from transformers import M2M100Tokenizer
-        kwargs = {}
-        if model_cache_dir:
-            kwargs["cache_dir"] = model_cache_dir
-        _tokenizer_cache[key] = M2M100Tokenizer.from_pretrained(model_name, **kwargs)
-    return _tokenizer_cache[key]
 
 
 @dataclass
@@ -350,7 +304,6 @@ class StructuredTranslator:
             excluded_tags=cfg.excluded_tags,
             excluded_classes=cfg.excluded_classes,
         )
-        glossary = list(cfg.glossary)
         # Token measurement uses the EXACT tokenizer already loaded by the
         # injected translator (authoritative cache policy, revision, and
         # resolved snapshot; truncation=False). The model loads lazily on
@@ -367,7 +320,6 @@ class StructuredTranslator:
                 document_id=self._document_id,
                 source_language=source_lang,
                 target_language=target_lang,
-                glossary=glossary,
                 preserve_patterns=tuple(
                     re.compile(p) for p in cfg.preserve_patterns
                 ),
@@ -591,41 +543,10 @@ class StructuredTranslator:
             translatable_attrs=translatable_attrs,
         )
 
-        # --- terminology consistency validation (node-scoped) ---
-        # Every configured glossary term must have been replaced by its
-        # target term wherever it occurred in TRANSLATABLE content. Counts
-        # are scoped to the translated text nodes ONLY — pre-existing target
-        # text or the source term in excluded/untouched HTML can never mask
-        # a lost glossary occurrence (a global substring count could).
-        glossary_occurrences = _collect_glossary_occurrences(all_segments)
-        translatable_node_ids = {
-            r.node_id
-            for s in all_segments
-            for r in s.runs
-            if r.node_id != "tag"
-        }
-        for term, info in glossary_occurrences.items():
-            target = info["target"]
-            in_translated = sum(
-                node.text.count(target)
-                for node in doc.text_nodes()
-                if node.id in translatable_node_ids
-            )
-            if in_translated < info["occurrences"]:
-                raise StructuredTranslationError(
-                    f"terminology consistency check failed: term {term!r} "
-                    f"mapped to {target!r} in {info['occurrences']} "
-                    f"occurrences, but the translated text nodes contain it "
-                    f"only {in_translated} times"
-                )
-
         # --- machine-readable metrics ---
         identifier_occurrences = _collect_identifier_occurrences(all_segments)
         metrics = {
-            "terminology": {
-                "glossary": glossary_occurrences,
-                "identifiers": identifier_occurrences,
-            },
+            "identifiers": identifier_occurrences,
             "repeated_terms": repeated_terms,
         }
 

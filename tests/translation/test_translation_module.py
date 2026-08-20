@@ -10,6 +10,7 @@ from image_translation.translation.config import (
     TranslationConfig,
 )
 from image_translation.translation.exceptions import (
+    TranslationConfigurationError,
     TranslationDeviceError,
     TranslationInputError,
 )
@@ -75,7 +76,7 @@ class TestTranslationModels:
         r = TranslationResult(
             source_text="你好",
             translated_text="Hello",
-            model_name="m2m100_418M",
+            model_name="nllb-200-distilled-600M",
             device="cuda:0",
         )
         assert r.translated_text == "Hello"
@@ -83,7 +84,7 @@ class TestTranslationModels:
 
     def test_runtime_info(self):
         info = TranslationRuntimeInfo(
-            model_name="m2m100_418M",
+            model_name="nllb-200-distilled-600M",
             device="cuda:0",
             ready=True,
             cuda_available=True,
@@ -100,9 +101,9 @@ class TestTranslationModels:
 class TestTranslationConfig:
     def test_defaults(self):
         cfg = TranslationConfig()
-        assert cfg.model_name == "facebook/m2m100_418M"
-        assert cfg.source_language == "zh"
-        assert cfg.target_language == "en"
+        assert cfg.model_name == "facebook/nllb-200-distilled-600M"
+        assert cfg.source_language == "zho_Hans"
+        assert cfg.target_language == "eng_Latn"
         assert cfg.device == "cuda"
         assert cfg.allow_cpu_fallback is False
 
@@ -128,7 +129,7 @@ class TestTranslationConfig:
 
     def test_generation_config_defaults(self):
         gen = GenerationConfig()
-        assert gen.max_new_tokens == 256
+        assert gen.max_new_tokens == 512
         assert gen.num_beams == 4
         assert gen.length_penalty == 1.0
 
@@ -158,14 +159,16 @@ class TestTranslationConfig:
 # ---------------------------------------------------------------------------
 
 class TestFactory:
-    def test_creates_m2m100(self):
-        cfg = TranslationConfig(model_name="facebook/m2m100_418M")
+    def test_creates_nllb(self):
+        cfg = TranslationConfig(model_name="facebook/nllb-200-distilled-600M")
         translator = create_translator(cfg)
-        assert translator.name == "m2m100@facebook/m2m100_418M"
+        assert translator.name == "nllb@facebook/nllb-200-distilled-600M"
 
     def test_rejects_unknown(self):
         cfg = TranslationConfig(model_name="unknown/model")
-        with pytest.raises(ValueError, match="Unknown translation engine"):
+        with pytest.raises(
+            TranslationConfigurationError, match="requires an NLLB model"
+        ):
             create_translator(cfg)
 
 
@@ -175,8 +178,8 @@ class TestFactory:
 
 class TestDeviceResolution:
     def _make_translator(self, **kwargs):
-        from image_translation.translation.m2m100_translator import M2M100Translator
-        return M2M100Translator(TranslationConfig(**kwargs))
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
+        return Seq2SeqTranslator(TranslationConfig(**kwargs))
 
     def test_cuda_required_raises_when_unavailable(self, monkeypatch):
         import torch
@@ -221,8 +224,8 @@ class TestDeviceResolution:
 
     def test_float16_on_cpu_rejected(self):
         from image_translation.translation.exceptions import TranslationConfigurationError
-        from image_translation.translation.m2m100_translator import M2M100Translator
-        t = M2M100Translator(TranslationConfig(device="cpu", precision="float16"))
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
+        t = Seq2SeqTranslator(TranslationConfig(device="cpu", precision="float16"))
         with pytest.raises(TranslationConfigurationError, match="float16"):
             t._load_model()
 
@@ -233,9 +236,9 @@ class TestDeviceResolution:
 
 class TestBatchTranslation:
     def test_batch_chunks_and_preserves_order(self, monkeypatch):
-        from image_translation.translation.m2m100_translator import M2M100Translator
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
 
-        t = M2M100Translator(TranslationConfig(batch_size=2))
+        t = Seq2SeqTranslator(TranslationConfig(batch_size=2))
         # Fake a loaded model so _translate_impl is reached
         t._model = object()
         t._tokenizer = object()
@@ -251,7 +254,7 @@ class TestBatchTranslation:
                     translated_text=f"EN:{x}",
                     source_language=source_lang,
                     target_language=target_lang,
-                    model_name="m2m100",
+                    model_name="fake",
                     device="cpu",
                 )
                 for x in texts
@@ -271,30 +274,30 @@ class TestBatchTranslation:
         ]
 
     def test_batch_empty(self):
-        from image_translation.translation.m2m100_translator import M2M100Translator
-        t = M2M100Translator(TranslationConfig())
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
+        t = Seq2SeqTranslator(TranslationConfig())
         assert t.translate_batch_texts([]) == []
 
 
 class TestActiveGenerationPath:
-    """Prove the ACTIVE M2M100 generation path (not just config defaults):
+    """Prove the ACTIVE NLLB generation path (not just config defaults):
     the exact kwargs passed to tokenizer() and model.generate()."""
 
     def _stub_translator(self):
         import torch
-        from image_translation.translation.m2m100_translator import (
-            M2M100Translator,
+        from image_translation.translation.seq2seq_translator import (
+            Seq2SeqTranslator,
         )
 
         cfg = TranslationConfig()  # precision="auto", num_beams=4
-        translator = M2M100Translator(cfg)
+        translator = Seq2SeqTranslator(cfg)
         captured = {}
 
         class FakeTokenizer:
             def __init__(self):
                 self.src_lang = None
 
-            def get_lang_id(self, lang):
+            def convert_tokens_to_ids(self, lang):
                 return {"zh": 128102, "en": 128022, "fr": 128014}.get(lang, -1)
 
             def __call__(self, texts, return_tensors=None, padding=None,
@@ -361,10 +364,10 @@ class TestActiveGenerationPath:
         assert "no_repeat_ngram_size" not in captured["generate_kwargs"]
 
     def test_auto_precision_never_calls_half(self):
-        from image_translation.translation.m2m100_translator import (
-            M2M100Translator,
+        from image_translation.translation.seq2seq_translator import (
+            Seq2SeqTranslator,
         )
-        translator = M2M100Translator(TranslationConfig(precision="auto"))
+        translator = Seq2SeqTranslator(TranslationConfig(precision="auto"))
 
         class Model:
             def half(self):
@@ -373,10 +376,10 @@ class TestActiveGenerationPath:
         assert translator._resolve_precision(Model(), "cpu") == "float32"
 
     def test_explicit_float16_calls_half(self):
-        from image_translation.translation.m2m100_translator import (
-            M2M100Translator,
+        from image_translation.translation.seq2seq_translator import (
+            Seq2SeqTranslator,
         )
-        translator = M2M100Translator(TranslationConfig(precision="float16"))
+        translator = Seq2SeqTranslator(TranslationConfig(precision="float16"))
         calls = []
 
         class Model:
@@ -389,24 +392,24 @@ class TestActiveGenerationPath:
 
 class TestGenerationQuality:
     def test_repeated_word_and_ngram_detection(self):
-        from image_translation.translation.m2m100_translator import (
-            M2M100Translator,
+        from image_translation.translation.seq2seq_translator import (
+            Seq2SeqTranslator,
         )
 
-        assert M2M100Translator.detect_degenerate_output(
+        assert Seq2SeqTranslator.detect_degenerate_output(
             "Bright Bright Bright Bright", source_tokens=4
         )
-        assert M2M100Translator.detect_degenerate_output(
+        assert Seq2SeqTranslator.detect_degenerate_output(
             "alpha beta alpha beta alpha beta", source_tokens=4
         )
-        assert not M2M100Translator.detect_degenerate_output(
+        assert not Seq2SeqTranslator.detect_degenerate_output(
             "A compact translation with useful meaning", source_tokens=5
         )
 
     def test_unknown_token_count_is_safe(self):
         import torch
-        from image_translation.translation.m2m100_translator import (
-            M2M100Translator,
+        from image_translation.translation.seq2seq_translator import (
+            Seq2SeqTranslator,
         )
 
         class Tokenizer:
@@ -415,7 +418,7 @@ class TestGenerationQuality:
             def convert_ids_to_tokens(self, ids):
                 return ["<unk>" for _ in ids]
 
-        count, tokens = M2M100Translator._unknown_token_diagnostics(
+        count, tokens = Seq2SeqTranslator._unknown_token_diagnostics(
             torch.tensor([[99, 1, 99]]), Tokenizer()
         )
         assert count == 2
@@ -423,11 +426,11 @@ class TestGenerationQuality:
 
 
 # ---------------------------------------------------------------------------
-# M2M100 decode cardinality: batch_decode must return exactly one output per
+# NLLB decode cardinality: batch_decode must return exactly one output per
 # input; the plain batch path must never return a mismatched result count.
 # ---------------------------------------------------------------------------
 
-class TestM2M100DecodeCardinality:
+class TestNLLBDecodeCardinality:
     @staticmethod
     def _make_translator(decode_outputs):
         from types import SimpleNamespace
@@ -435,9 +438,9 @@ class TestM2M100DecodeCardinality:
         import torch
 
         from image_translation.translation.config import TranslationConfig
-        from image_translation.translation.m2m100_translator import M2M100Translator
+        from image_translation.translation.seq2seq_translator import Seq2SeqTranslator
 
-        t = M2M100Translator(TranslationConfig())
+        t = Seq2SeqTranslator(TranslationConfig())
 
         class FakeTokenizer:
             src_lang = "zh"
@@ -450,7 +453,7 @@ class TestM2M100DecodeCardinality:
                     "attention_mask": torch.ones(n, 4, dtype=torch.long),
                 }
 
-            def get_lang_id(self, lang):
+            def convert_tokens_to_ids(self, lang):
                 return 1
 
             def batch_decode(self, generated, skip_special_tokens=True):
