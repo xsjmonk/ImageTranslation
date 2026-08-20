@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 from copy import deepcopy
 import threading
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -21,10 +23,20 @@ from .config import TranslationServerConfig, load_server_config
 
 logger = logging.getLogger(__name__)
 
-DIAGNOSTIC_MAX_ENTRIES = 8
-DIAGNOSTIC_MAX_SEGMENTS = 128
-DIAGNOSTIC_MAX_TEXT = 256
-DIAGNOSTIC_MAX_ITEMS = 32
+@dataclass(frozen=True)
+class DiagnosticBudget:
+    max_entries: int = 8
+    max_segments: int = 128
+    max_items: int = 32
+    max_keys: int = 32
+    max_string_bytes: int = 256
+    max_entry_bytes: int = 64 * 1024
+    max_total_bytes: int = 8 * 64 * 1024
+
+
+DIAGNOSTIC_BUDGET = DiagnosticBudget()
+DIAGNOSTIC_MAX_ENTRIES = DIAGNOSTIC_BUDGET.max_entries
+DIAGNOSTIC_MAX_TEXT = DIAGNOSTIC_BUDGET.max_string_bytes
 
 
 class TranslationRuntime:
@@ -37,7 +49,7 @@ class TranslationRuntime:
         self._structured_invocations_lock = threading.Lock()
         # Bounded, summary-only diagnostics; full chapters never live here.
         self._structured_diagnostics: deque[dict] = deque(
-            maxlen=DIAGNOSTIC_MAX_ENTRIES
+            maxlen=DIAGNOSTIC_BUDGET.max_entries
         )
         self._plain_invocations = 0
 
@@ -94,9 +106,12 @@ class TranslationRuntime:
                     ).hexdigest(),
                     "segments": [
                         self._bound_segment(segment)
-                        for segment in result.segments[:DIAGNOSTIC_MAX_SEGMENTS]
+                        for segment in result.segments[:DIAGNOSTIC_BUDGET.max_segments]
                     ],
                 }
+            )
+            self._structured_diagnostics[-1] = self._fit_diagnostic(
+                self._structured_diagnostics[-1]
             )
         return result
 
@@ -112,28 +127,79 @@ class TranslationRuntime:
 
     @staticmethod
     def _bound_segment(segment: dict) -> dict:
-        """Keep only bounded plan/output evidence for diagnostics."""
-        bounded = {}
-        for key, value in segment.items():
-            if isinstance(value, str):
-                if key in {"source_text", "block_text", "translated_text"}:
-                    bounded[f"{key}_fingerprint"] = hashlib.sha256(
-                        value.encode("utf-8")
-                    ).hexdigest()
-                bounded[key] = value[:DIAGNOSTIC_MAX_TEXT]
-            elif isinstance(value, list):
-                bounded[key] = [
-                    item if not isinstance(item, str) else item[:DIAGNOSTIC_MAX_TEXT]
-                    for item in value[:DIAGNOSTIC_MAX_ITEMS]
-                ]
-            elif isinstance(value, dict):
-                bounded[key] = {
-                    str(k): (v[:DIAGNOSTIC_MAX_TEXT] if isinstance(v, str) else v)
-                    for k, v in list(value.items())[:DIAGNOSTIC_MAX_ITEMS]
-                }
-            else:
-                bounded[key] = value
-        return bounded
+        """Recursively sanitize a segment to JSON-safe bounded data."""
+        return TranslationRuntime._sanitize_diagnostic(segment)
+
+    @staticmethod
+    def _sanitize_diagnostic(value, *, depth: int = 0):
+        budget = DIAGNOSTIC_BUDGET
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            raw = value.encode("utf-8")
+            if len(raw) <= budget.max_string_bytes:
+                return value
+            marker = "…".encode("utf-8")
+            return (
+                raw[: max(0, budget.max_string_bytes - len(marker))]
+                .decode("utf-8", "ignore")
+                + "…"
+            )
+        if depth > 12:
+            return {"__truncated__": True, "reason": "max_depth"}
+        if isinstance(value, dict):
+            result = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= budget.max_keys:
+                    result["__truncated_keys__"] = True
+                    break
+                result[str(key)] = TranslationRuntime._sanitize_diagnostic(
+                    item, depth=depth + 1
+                )
+            return result
+        if isinstance(value, (list, tuple)):
+            result = [
+                TranslationRuntime._sanitize_diagnostic(item, depth=depth + 1)
+                for item in value[: budget.max_items]
+            ]
+            if len(value) > budget.max_items:
+                result.append({"__truncated_items__": True})
+            return result
+        return {"__unsupported__": type(value).__name__[:64]}
+
+    @staticmethod
+    def _fit_diagnostic(value: dict) -> dict:
+        """Enforce serialized byte budget, failing closed to a summary."""
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        if len(encoded) <= DIAGNOSTIC_BUDGET.max_entry_bytes:
+            return value
+        # Preserve a bounded plan sample for tests/debugging before falling
+        # back to a summary-only record.
+        if isinstance(value.get("segments"), list):
+            candidate = dict(value)
+            segments = value["segments"]
+            for count in (64, 32, 16, 8, 4, 2, 1):
+                candidate["segments"] = segments[:count]
+                candidate["segments_truncated"] = len(segments) > count
+                if len(
+                    json.dumps(
+                        candidate, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+                ) <= DIAGNOSTIC_BUDGET.max_entry_bytes:
+                    return candidate
+        summary = {
+            "invocation": value.get("invocation"),
+            "duration_seconds": value.get("duration_seconds"),
+            "segment_count": value.get("segment_count"),
+            "retry_count": value.get("retry_count"),
+            "fallback_count": value.get("fallback_count"),
+            "output_fingerprint": value.get("output_fingerprint"),
+            "__truncated__": True,
+            "serialized_bytes": len(encoded),
+        }
+        return summary
 
     def cache_diagnostics(self) -> dict:
         """Config-derived cache diagnostics for startup logging.

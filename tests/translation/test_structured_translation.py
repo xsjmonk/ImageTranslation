@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import threading
 
 import pytest
 
@@ -18,6 +20,7 @@ from image_translation.translation.structured_translation import (
 )
 from translation_server.config import TranslationServerConfig
 from translation_server.runtime import (
+    DIAGNOSTIC_BUDGET,
     DIAGNOSTIC_MAX_ENTRIES,
     DIAGNOSTIC_MAX_TEXT,
     TranslationRuntime,
@@ -273,13 +276,66 @@ def test_runtime_diagnostics_are_bounded_and_copy_safe():
                 "invocation": index,
                 "segments": [
                     runtime._bound_segment(
-                        {"source_text": "x" * (DIAGNOSTIC_MAX_TEXT * 4)}
+                        {
+                            "source_text": "x" * (DIAGNOSTIC_MAX_TEXT * 4),
+                            "runs": [
+                                {
+                                    "raw": "中" * 1000,
+                                    "protected": "p" * 1000,
+                                    "restore_text": "r" * 1000,
+                                }
+                            ],
+                        }
                     )
                 ],
             }
         )
     diagnostics = runtime.structured_diagnostics
     assert len(diagnostics) == DIAGNOSTIC_MAX_ENTRIES
-    assert len(diagnostics[0]["segments"][0]["source_text"]) == DIAGNOSTIC_MAX_TEXT
+    assert len(
+        diagnostics[0]["segments"][0]["source_text"].encode("utf-8")
+    ) <= DIAGNOSTIC_BUDGET.max_string_bytes
+    encoded = [
+        len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+        for item in diagnostics
+    ]
+    assert max(encoded) <= DIAGNOSTIC_BUDGET.max_entry_bytes
+    assert sum(encoded) <= DIAGNOSTIC_BUDGET.max_total_bytes
+
+    def walk(value):
+        if isinstance(value, dict):
+            for nested in value.values():
+                yield from walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from walk(nested)
+        else:
+            yield value
+
+    assert all(
+        value is None or isinstance(value, (bool, int, float, str))
+        for item in diagnostics
+        for value in walk(item)
+    )
     diagnostics[0]["segments"][0]["source_text"] = "mutated"
     assert runtime.structured_diagnostics[0]["segments"][0]["source_text"] != "mutated"
+
+    errors = []
+    def concurrent_access():
+        try:
+            for _ in range(20):
+                with runtime._structured_invocations_lock:
+                    runtime._structured_diagnostics.append(
+                        runtime._fit_diagnostic(
+                            {"segments": [{"nested": "x" * 1000}]}
+                        )
+                    )
+                runtime.structured_diagnostics
+        except Exception as exc:  # pragma: no cover - assertion below
+            errors.append(exc)
+    threads = [threading.Thread(target=concurrent_access) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
