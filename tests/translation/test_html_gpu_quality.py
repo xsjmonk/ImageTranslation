@@ -7,6 +7,7 @@ Uses the REAL NLLB model (FP32, num_beams=4). Run explicitly:
 from __future__ import annotations
 
 import gc
+import hashlib
 import re
 import threading
 import time
@@ -418,10 +419,10 @@ class TestHtmlGpuQuality:
         import requests
         import uvicorn
 
-        from image_translation.translation import StructuredTranslator
         from translation_server.app import create_app
         from translation_server.config import load_server_config
         from translation_server.runtime import TranslationRuntime
+        from image_translation.translation import compare_document_structure
 
         html = _build_long_chapter()
         cfg = load_server_config()
@@ -432,13 +433,11 @@ class TestHtmlGpuQuality:
 
         # Direct module and API share the exact runtime-owned translator.
         runtime = TranslationRuntime(cfg)
-        translator = runtime.translator
-        st = StructuredTranslator(
-            translator, cfg.structured, cfg.translation,
-            document_id="parity-long",
-        )
-        res = st.translate(
-            html, cfg.translation.source_language, cfg.translation.target_language
+        res = runtime.translate_structured(
+            html,
+            cfg.translation.source_language,
+            cfg.translation.target_language,
+            "parity-long",
         )
         direct = res.translated_html
         direct_metrics = {
@@ -466,7 +465,7 @@ class TestHtmlGpuQuality:
         assert direct.find("X1300") > direct.find("X13")
         assert direct.find("END-OF-CHAPTER") > direct.find("Charger")
 
-        # Live HTTP API over the same runtime-owned translator.
+        # Live HTTP API over the same runtime-owned translation service.
         assert cfg.translation.precision == "auto"
         assert cfg.translation.generation.num_beams == 4
         assert cfg.structured.max_segment_tokens == 450
@@ -498,10 +497,47 @@ class TestHtmlGpuQuality:
             )
             assert resp.status_code == 200, f"API {resp.status_code}: {resp.text}"
             api_out = resp.json()["translation"]
-            assert api_out == direct, (
-                f"API HTML output differs from direct service!\n"
-                f"direct: {direct[:400]!r}\napi:    {api_out[:400]!r}"
-            )
+            assert runtime.structured_invocation_count == 2
+            api_segments = runtime.structured_diagnostics[-1]["segments"]
+            assert len(api_segments) == len(res.segments)
+            for left, right in zip(res.segments, api_segments):
+                for key in (
+                    "sequence_index",
+                    "source_node_ids",
+                    "token_count",
+                    "placeholder_order",
+                    "block_key",
+                ):
+                    assert left.get(key) == right.get(key), (
+                        f"API plan differs at segment {left.get('segment_id')}: "
+                        f"{key} direct={left.get(key)!r} api={right.get(key)!r}"
+                    )
+                assert hashlib.sha256(
+                    left["source_text"].encode("utf-8")
+                ).hexdigest() == right["source_text_fingerprint"]
+                assert left["segment_id"].split(":", 1)[-1] == right[
+                    "segment_id"
+                ].split(":", 1)[-1]
+            # Independent GPU beam searches may choose different valid wording.
+            # The real contract is structural, lexical, and semantic parity.
+            for output in (direct, api_out):
+                structure = compare_document_structure(html, output)
+                assert structure["equal"], structure
+                assert "ABC-123" in output
+                assert "USB-C" in output
+                assert "Windows 11" in output
+                assert output.count("ABC-123") == html.count("ABC-123")
+                assert output.count("USB-C") == html.count("USB-C")
+                assert output.count("Windows 11") == html.count("Windows 11")
+                assert output.count("&nbsp;") == html.count("&nbsp;")
+                assert output.count("&#160;") == html.count("&#160;")
+                assert output.count("&#xA0;") == html.count("&#xA0;")
+                assert output.count("&amp;") == html.count("&amp;")
+                assert output.count("<br/>") == html.count("<br/>")
+                assert output.count("<a ") == html.count("<a ")
+                assert "product" in output.lower() or "charger" in output.lower()
+                assert "充电器产品说明书" not in output
+                assert output.find("END-OF-CHAPTER") > output.find("Charger")
             # the API side carries the same structural evidence
             assert api_out.count("ABC-123") == html.count("ABC-123")
             assert api_out.count("&nbsp;") == html.count("&nbsp;")

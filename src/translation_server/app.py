@@ -35,7 +35,6 @@ from image_translation.translation.exceptions import (
     TranslationModelLoadError,
     TranslationQualityError,
 )
-from image_translation.translation.structured_translation import StructuredTranslator
 
 from .api_models import (
     CacheResponse,
@@ -180,7 +179,7 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
                     runtime, translator, req, source_lang, target_lang, correlation_id
                 )
             return await _translate_plain(
-                translator,
+                runtime,
                 req,
                 source_lang,
                 target_lang,
@@ -236,11 +235,11 @@ def _http(
 
 
 async def _translate_plain(
-    translator, req: TranslateRequest, source_lang: str, target_lang: str, correlation_id: str
+    service, req: TranslateRequest, source_lang: str, target_lang: str, correlation_id: str
 ) -> TranslateResponse:
     try:
         result = await run_in_threadpool(
-            translator.translate_text, req.text, source_lang, target_lang
+            service.translate_plain, req.text, source_lang, target_lang
         )
     except TranslationInputError as e:
         raise _http(400, str(e), correlation_id, "invalid_input") from e
@@ -270,15 +269,13 @@ async def _translate_html(
             "invalid_format",
         )
 
-    st = StructuredTranslator(
-        translator,
-        cfg,
-        runtime.config.translation,
-        document_id=correlation_id,
-    )
     try:
         result = await run_in_threadpool(
-            st.translate, req.text, source_lang, target_lang
+            runtime.translate_structured,
+            req.text,
+            source_lang,
+            target_lang,
+            correlation_id,
         )
     except StructuredTranslationError as e:
         message = str(e)

@@ -41,6 +41,7 @@ generation (fixed beams).
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import time
 import uuid
@@ -239,6 +240,80 @@ class StructuredTranslationResult:
             "source_language": self.source_language,
             "target_language": self.target_language,
         }
+
+
+def compare_structured_results(
+    left: StructuredTranslationResult,
+    right: StructuredTranslationResult,
+    *,
+    excerpt_limit: int = 120,
+) -> dict:
+    """Return a bounded diagnostic locating the first actual divergence."""
+    if left.source_language != right.source_language or left.target_language != right.target_language:
+        layer, index, parity_class = "language_pair", None, "plan_mismatch"
+    elif len(left.segments) != len(right.segments):
+        layer, index, parity_class = "segment_count", None, "plan_mismatch"
+    else:
+        layer, index, parity_class = "final_html", None, "exact"
+        for candidate, (a, b) in enumerate(zip(left.segments, right.segments)):
+            if any(
+                a.get(key) != b.get(key)
+                for key in (
+                    "segment_id",
+                    "sequence_index",
+                    "source_text",
+                    "source_node_ids",
+                    "block_key",
+                    "placeholder_order",
+                    "token_count",
+                )
+            ):
+                layer, index, parity_class = "segment_plan", candidate, "plan_mismatch"
+                break
+            if any(
+                a.get(key) != b.get(key)
+                for key in (
+                    "translated_text",
+                    "output_pieces",
+                    "protected_sequence_found",
+                )
+            ):
+                layer, index, parity_class = "model_output", candidate, "model_variation"
+                break
+        if layer == "final_html" and left.translated_html != right.translated_html:
+            layer, parity_class = "final_html", "reconstruction_mismatch"
+        elif layer == "final_html" and left.translated_html == right.translated_html:
+            return {"equal": True, "layer": None}
+    if index is None:
+        left_segment = right_segment = {}
+        source = ""
+        left_text, right_text = left.translated_html, right.translated_html
+    else:
+        left_segment, right_segment = left.segments[index], right.segments[index]
+        source = str(left_segment.get("source_text", ""))
+        left_text = str(left_segment.get("translated_text", ""))
+        right_text = str(right_segment.get("translated_text", ""))
+    first_offset = next(
+        (offset for offset, (a, b) in enumerate(zip(left_text, right_text)) if a != b),
+        min(len(left_text), len(right_text)),
+    )
+    return {
+        "equal": False,
+        "parity_class": parity_class,
+        "layer": layer,
+        "segment_index": index,
+        "segment_id": left_segment.get("segment_id"),
+        "source_excerpt": source[:excerpt_limit],
+        "left_excerpt": left_text[:excerpt_limit],
+        "right_excerpt": right_text[:excerpt_limit],
+        "first_character_offset": first_offset,
+        "left_fingerprint": hashlib.sha256(left.translated_html.encode("utf-8")).hexdigest(),
+        "right_fingerprint": hashlib.sha256(right.translated_html.encode("utf-8")).hexdigest(),
+        "left_invocation_id": left.correlation_id,
+        "right_invocation_id": right.correlation_id,
+        "left_duration_seconds": left.duration_seconds,
+        "right_duration_seconds": right.duration_seconds,
+    }
 
 
 class StructuredTranslator:
@@ -486,6 +561,8 @@ class StructuredTranslator:
                         )
                         if check["ok"]:
                             seg.translated_text = out
+                            seg.retry_count = 0
+                            seg.fallback_count = 0
                             total_target_tokens += budgets[id(seg)]
                             logger.info(
                                 "[STRUCTURED] correlation=%s seg=%s tokens=%d "
@@ -517,6 +594,8 @@ class StructuredTranslator:
                             f"safely after retries and split fallback"
                         )
                     seg.translated_text = translated
+                    seg.retry_count = retried
+                    seg.fallback_count = fell_back
                     total_target_tokens += budgets[id(seg)]
 
                 batch_metrics.append({

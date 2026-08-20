@@ -11,8 +11,16 @@ from image_translation.translation.config import StructuredConfig, TranslationCo
 from image_translation.translation.exceptions import StructuredTranslationError
 from image_translation.translation.models import TranslationResult
 from image_translation.translation.structured_translation import (
+    StructuredTranslationResult,
     StructuredTranslator,
+    compare_structured_results,
     translate_html,
+)
+from translation_server.config import TranslationServerConfig
+from translation_server.runtime import (
+    DIAGNOSTIC_MAX_ENTRIES,
+    DIAGNOSTIC_MAX_TEXT,
+    TranslationRuntime,
 )
 
 
@@ -186,3 +194,92 @@ class TestStructuredTranslate:
         segs = res.segments
         assert segs[0]["context_after_id"] == segs[1]["segment_id"]
         assert segs[1]["context_before_id"] == segs[0]["segment_id"]
+
+
+def _snapshot_result(*, output="same", language="zho_Hans", segments=None):
+    return StructuredTranslationResult(
+        translated_html=output,
+        correlation_id="request-id",
+        segment_count=len(segments or []),
+        total_source_tokens=3,
+        total_target_tokens=3,
+        retry_count=0,
+        fallback_count=0,
+        protected_run_count=1,
+        duration_seconds=0.1,
+        fingerprint_ok=True,
+        excluded_text_nodes=0,
+        translated_attributes=0,
+        source_language=language,
+        target_language="eng_Latn",
+        segments=segments or [],
+    )
+
+
+def test_structured_comparator_classifies_plan_and_model_variation():
+    base = {
+        "segment_id": "doc:0000",
+        "sequence_index": 0,
+        "source_text": "你好",
+        "source_node_ids": ["text:1"],
+        "block_key": "p:1",
+        "placeholder_order": ["TAG"],
+        "protected_sequence_found": ["TAG"],
+        "output_pieces": ["Hello"],
+        "token_count": 2,
+        "translated_text": "Hello",
+    }
+    plan = dict(base, source_text="再见")
+    wording = dict(base, translated_text="Hi", output_pieces=["Hi"])
+    assert compare_structured_results(
+        _snapshot_result(segments=[base]), _snapshot_result(segments=[plan])
+    )["parity_class"] == "plan_mismatch"
+    assert compare_structured_results(
+        _snapshot_result(segments=[base]), _snapshot_result(segments=[wording])
+    )["parity_class"] == "model_variation"
+
+
+def test_structured_comparator_detects_final_output_and_language_mismatch():
+    base = {
+        "segment_id": "doc:0000",
+        "sequence_index": 0,
+        "source_text": "你好",
+        "source_node_ids": ["text:1"],
+        "block_key": "p:1",
+        "placeholder_order": [],
+        "protected_sequence_found": [],
+        "output_pieces": ["Hello"],
+        "token_count": 2,
+        "translated_text": "Hello",
+    }
+    mismatch = compare_structured_results(
+        _snapshot_result(output="<p>Hello</p>", segments=[base]),
+        _snapshot_result(output="<div>Hello</div>", segments=[base]),
+    )
+    assert mismatch["parity_class"] == "reconstruction_mismatch"
+    assert mismatch["first_character_offset"] >= 0
+    assert mismatch["left_fingerprint"] != mismatch["right_fingerprint"]
+    assert compare_structured_results(
+        _snapshot_result(segments=[base]),
+        _snapshot_result(language="eng_Latn", segments=[base]),
+    )["parity_class"] == "plan_mismatch"
+
+
+def test_runtime_diagnostics_are_bounded_and_copy_safe():
+    runtime = TranslationRuntime(TranslationServerConfig())
+    for index in range(DIAGNOSTIC_MAX_ENTRIES + 4):
+        runtime._structured_diagnostics.append(
+            {
+                "invocation": index,
+                "segments": [
+                    runtime._bound_segment(
+                        {"source_text": "x" * (DIAGNOSTIC_MAX_TEXT * 4)}
+                    )
+                ],
+            }
+        )
+    diagnostics = runtime.structured_diagnostics
+    assert len(diagnostics) == DIAGNOSTIC_MAX_ENTRIES
+    assert len(diagnostics[0]["segments"][0]["source_text"]) == DIAGNOSTIC_MAX_TEXT
+    diagnostics[0]["segments"][0]["source_text"] = "mutated"
+    assert runtime.structured_diagnostics[0]["segments"][0]["source_text"] != "mutated"

@@ -161,6 +161,9 @@ class Segment:
     # Filled after translation:
     translated_text: str = ""
     output_pieces: List[str] = field(default_factory=list)
+    protected_sequence_found: List[str] = field(default_factory=list)
+    retry_count: int = 0
+    fallback_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -174,6 +177,15 @@ class Segment:
             "token_count": self.token_count,
             "context_before_id": self.context_before_id,
             "context_after_id": self.context_after_id,
+            "block_key": self.block_key,
+            "block_text": self.block_text,
+            "token_count": self.token_count,
+            "placeholder_order": list(self.placeholder_order),
+            "translated_text": self.translated_text,
+            "output_pieces": list(self.output_pieces),
+            "protected_sequence_found": list(self.protected_sequence_found),
+            "retry_count": self.retry_count,
+            "fallback_count": self.fallback_count,
             "runs": [r.to_dict() for r in self.runs],
         }
 

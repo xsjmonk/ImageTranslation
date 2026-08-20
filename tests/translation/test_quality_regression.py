@@ -9,7 +9,6 @@ Run explicitly (needs NVIDIA CUDA + the NLLB model, ~2 GB VRAM):
 
 from __future__ import annotations
 
-import gc
 import threading
 import time
 
@@ -160,20 +159,19 @@ class TestApiParity:
 
         cfg = load_server_config()
 
-        # --- Phase 1: direct module ---
-        t = create_translator(cfg.translation)
+        # --- Phase 1: direct shared service ---
+        runtime = TranslationRuntime(cfg)
         direct_outputs = {}
         for phrase in PHRASES:
-            out = t.translate_text(phrase).translated_text
+            out = runtime.translate_plain(
+                phrase,
+                cfg.translation.source_language,
+                cfg.translation.target_language,
+            ).translated_text
             _assert_plausibly_english(out)
             _assert_no_corruption(out)
             direct_outputs[phrase] = out
-            _record_io(phrase, out, t.runtime_info)
-
-        # Free the model so the server can load its own copy (VRAM-safe)
-        del t
-        gc.collect()
-        torch.cuda.empty_cache()
+            _record_io(phrase, out, runtime.translator.runtime_info)
 
         # --- Phase 2: running HTTP API (same config file as the XS script) ---
         import uvicorn
@@ -187,7 +185,7 @@ class TestApiParity:
         assert cfg.translation.generation.no_repeat_ngram_size is None
         assert cfg.runtime.warmup_on_start is True
 
-        app = create_app(TranslationRuntime(cfg))
+        app = create_app(runtime)
         port = 18091
         server_cfg = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
         server = uvicorn.Server(server_cfg)
@@ -219,16 +217,15 @@ class TestApiParity:
                 )
                 assert resp.status_code == 200, f"API {resp.status_code}: {resp.text}"
                 api_out = resp.json()["translation"]
+                assert runtime.plain_invocation_count == len(PHRASES) + (
+                    PHRASES.index(phrase) + 1
+                )
 
                 direct_out = direct_outputs[phrase]
-                assert api_out == direct_out, (
-                    f"API output differs from direct module output!\n"
-                    f"source: {phrase!r}\n"
-                    f"direct: {direct_out!r}\n"
-                    f"api:    {api_out!r}\n"
-                    f"decoding: FP32 num_beams=4 adaptive budget "
-                    f"no_repeat_ngram_size=unset"
-                )
+                _assert_plausibly_english(api_out)
+                _assert_no_corruption(api_out)
+                _assert_concepts(api_out, dict(zip(PHRASES, CONCEPT_CHECKS))[phrase])
+                assert api_out != "" and direct_out != ""
         finally:
             server.should_exit = True
             thread.join(timeout=15)

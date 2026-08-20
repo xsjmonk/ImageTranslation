@@ -363,6 +363,35 @@ class HTMLDocument:
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def compare_document_structure(
+    source: str,
+    output: str,
+    *,
+    translatable_attrs: Set[str] = frozenset(),
+) -> dict:
+    """Compare parser-level structure while allowing translated text nodes."""
+    left = HTMLDocument(source)
+    right = HTMLDocument(output)
+    left_nodes = [
+        (node.kind, getattr(node, "tag", None), getattr(node, "id", None))
+        for node in left.walk()
+    ]
+    right_nodes = [
+        (node.kind, getattr(node, "tag", None), getattr(node, "id", None))
+        for node in right.walk()
+    ]
+    return {
+        "equal": (
+            left.fingerprint(translatable_attrs) == right.fingerprint(translatable_attrs)
+            and left_nodes == right_nodes
+        ),
+        "source_fingerprint": left.fingerprint(translatable_attrs),
+        "output_fingerprint": right.fingerprint(translatable_attrs),
+        "source_node_stream": left_nodes,
+        "output_node_stream": right_nodes,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Lexical scanner: character-reference sentinelization + raw tag spellings
 # ---------------------------------------------------------------------------

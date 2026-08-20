@@ -366,7 +366,6 @@ class Seq2SeqTranslator(Translator):
         device_str = self._resolve_device()
 
         if device_str.startswith("cuda"):
-            self._configure_cuda_reproducibility(torch)
             gpu_name = torch.cuda.get_device_name(self._config.cuda_device)
             logger.info("[INFO] Translation device: %s", device_str)
             logger.info("[INFO] GPU: %s", gpu_name)
@@ -427,16 +426,6 @@ class Seq2SeqTranslator(Translator):
 
         logger.info("[INFO] Model ready (snapshot=%s, %s).",
                     snapshot_path, resolved.cache_status)
-
-    @staticmethod
-    def _configure_cuda_reproducibility(torch) -> None:
-        """Disable known CUDA variation without forcing unsupported kernels."""
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        if hasattr(torch, "set_float32_matmul_precision"):
-            torch.set_float32_matmul_precision("highest")
 
     def _resolve_precision(self, model, device_str: str) -> str:
         """Apply precision strategy and return the effective precision name.

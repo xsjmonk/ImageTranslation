@@ -108,6 +108,8 @@ def rebuild_document(
         pieces, protected_sequence = seg.protected_map.restore_split(
             seg.translated_text
         )
+        seg.output_pieces = list(pieces)
+        seg.protected_sequence_found = [s.token for s in protected_sequence]
 
         # Alignment: pieces must map 1:1 onto the recorded slots, and the
         # placeholder sequence must match the source layout EXACTLY.

@@ -19,7 +19,7 @@ from .exceptions import (
     TranslationQualityError,
 )
 from .factory import create_translator
-from .html_document import HTMLDocument
+from .html_document import HTMLDocument, compare_document_structure
 from .html_protection import ProtectionMap
 from .language_segments import classify, LanguageKind, protect_identifiers
 from .seq2seq_translator import Seq2SeqTranslator
@@ -29,6 +29,7 @@ from .reconstruction import rebuild_document
 from .structured_translation import (
     StructuredTranslationResult,
     StructuredTranslator,
+    compare_structured_results,
     translate_html,
 )
 from .text_utils import preprocess
@@ -66,6 +67,7 @@ __all__ = [
     "preprocess",
     # Structured (HTML-aware) translation
     "HTMLDocument",
+    "compare_document_structure",
     "ProtectionMap",
     "LanguageKind",
     "classify",
@@ -76,5 +78,6 @@ __all__ = [
     "rebuild_document",
     "StructuredTranslator",
     "StructuredTranslationResult",
+    "compare_structured_results",
     "translate_html",
 ]
