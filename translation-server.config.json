@@ -29,6 +29,7 @@
     "concurrency": 1
   },
   "translation": {
+    "default_style": "sentence",
     "model_name": "facebook/nllb-200-distilled-600M",
     "model_family": "nllb",
     "model_revision": "main",
@@ -59,7 +60,21 @@
       "max_repeated_ngram_ratio": 0.35,
       "retry_on_degenerate_output": true,
       "retry_num_beams": 1,
-      "retry_max_new_tokens": 64
+      "retry_max_new_tokens": 64,
+      "styles": {
+        "sentence": {
+          "target_token_multiplier": 2.5,
+          "short_text_max_new_tokens": 64,
+          "length_penalty": 1.0
+        },
+        "phrase": {
+          "target_token_multiplier": 1.5,
+          "short_text_max_new_tokens": 32,
+          "length_penalty": 0.8,
+          "max_expansion_ratio": 3.0,
+          "scaffolding_policy": "warn"
+        }
+      }
     }
   }
 }

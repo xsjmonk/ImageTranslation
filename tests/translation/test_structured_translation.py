@@ -10,6 +10,11 @@ import pytest
 
 from image_translation.translation.base import Translator
 from image_translation.translation.config import StructuredConfig, TranslationConfig
+from image_translation.translation.config import TranslationStyle
+from image_translation.translation.phrase_policy import (
+    content_token_count,
+    validate_phrase_output,
+)
 from image_translation.translation.exceptions import StructuredTranslationError
 from image_translation.translation.models import TranslationResult
 from image_translation.translation.structured_translation import (
@@ -339,3 +344,25 @@ def test_runtime_diagnostics_are_bounded_and_copy_safe():
     for thread in threads:
         thread.join()
     assert not errors
+
+
+def test_style_policy_defaults_and_phrase_profile_are_immutable():
+    config = TranslationConfig()
+    sentence = config.generation.resolve_style("sentence", 20)
+    phrase = config.generation.resolve_style(TranslationStyle.PHRASE, 20)
+    assert config.default_style is TranslationStyle.SENTENCE
+    assert sentence.target_token_multiplier == 2.5
+    assert phrase.target_token_multiplier == 1.5
+    assert phrase.length_penalty == 0.8
+    assert config.generation.target_token_multiplier == 2.5
+    with pytest.raises(ValueError):
+        config.generation.resolve_style("invalid", 20)
+
+
+def test_phrase_validator_uses_project_placeholders_and_cjk_units():
+    source = "德国蔡司纯钛眼镜 __ITRANSLATE_E0001_ ABC-123"
+    output = "Zeiss titanium eyeglasses __ITRANSLATE_E0001_ ABC-123"
+    result = validate_phrase_output(source, output, max_expansion_ratio=3.0)
+    assert result.accepted
+    assert content_token_count("德国蔡司纯钛眼镜") == 8
+    assert content_token_count("ABC-123 blue-light") == 2

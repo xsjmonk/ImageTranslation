@@ -4,8 +4,48 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from math import ceil
 from typing import Optional
+
+
+class TranslationStyle(str, Enum):
+    SENTENCE = "sentence"
+    PHRASE = "phrase"
+
+
+def resolve_translation_style(
+    requested: TranslationStyle | str | None,
+    default: TranslationStyle,
+) -> TranslationStyle:
+    """Normalize once; omitted uses default and invalid values fail."""
+    if requested is None:
+        return TranslationStyle(default)
+    if not isinstance(requested, str) or not requested.strip():
+        raise ValueError("translation style must be 'sentence' or 'phrase'")
+    try:
+        return TranslationStyle(requested)
+    except ValueError as exc:
+        raise ValueError(
+            "translation style must be 'sentence' or 'phrase'"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class ResolvedGenerationPolicy:
+    style: TranslationStyle
+    max_new_tokens: int
+    min_new_tokens: int
+    target_token_multiplier: float
+    num_beams: int
+    do_sample: bool
+    no_repeat_ngram_size: int | None
+    length_penalty: float
+    early_stopping: bool
+    max_expansion_ratio: float | None
+    scaffolding_policy: str
+    retry_max_new_tokens: int
+    retry_num_beams: int
 
 
 @dataclass
@@ -26,6 +66,11 @@ class GenerationConfig:
     retry_on_degenerate_output: bool = True
     retry_num_beams: int = 1
     retry_max_new_tokens: int = 64
+    phrase_target_token_multiplier: float = 1.5
+    phrase_short_text_max_new_tokens: int = 32
+    phrase_length_penalty: float = 0.8
+    phrase_max_expansion_ratio: float = 3.0
+    phrase_scaffolding_policy: str = "warn"
 
     def __post_init__(self) -> None:
         if self.max_new_tokens < 1:
@@ -56,6 +101,43 @@ class GenerationConfig:
             raise ValueError(
                 "generation.retry_max_new_tokens must be >= min_new_tokens"
             )
+        if self.phrase_scaffolding_policy not in {"off", "warn", "retry", "reject"}:
+            raise ValueError(
+                "generation.phrase_scaffolding_policy must be off, warn, retry, or reject"
+            )
+
+    def resolve_style(
+        self, style: TranslationStyle | str, source_tokens: int
+    ) -> ResolvedGenerationPolicy:
+        try:
+            resolved = resolve_translation_style(style, TranslationStyle.SENTENCE)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("translation style must be 'sentence' or 'phrase'") from exc
+        if source_tokens < 1:
+            raise ValueError("source_tokens must be >= 1")
+        phrase = resolved is TranslationStyle.PHRASE
+        return ResolvedGenerationPolicy(
+            style=resolved,
+            max_new_tokens=(
+                self.phrase_short_text_max_new_tokens
+                if phrase and source_tokens <= 32
+                else self.max_new_tokens
+            ),
+            min_new_tokens=self.min_new_tokens,
+            target_token_multiplier=(
+                self.phrase_target_token_multiplier
+                if phrase else self.target_token_multiplier
+            ),
+            num_beams=self.num_beams,
+            do_sample=self.do_sample,
+            no_repeat_ngram_size=self.no_repeat_ngram_size,
+            length_penalty=self.phrase_length_penalty if phrase else self.length_penalty,
+            early_stopping=self.early_stopping,
+            max_expansion_ratio=self.phrase_max_expansion_ratio if phrase else None,
+            scaffolding_policy=self.phrase_scaffolding_policy if phrase else "off",
+            retry_max_new_tokens=self.retry_max_new_tokens,
+            retry_num_beams=self.retry_num_beams,
+        )
 
     def target_budget(self, source_tokens: int, explicit: int | None = None) -> int:
         """Return a validated target budget from measured source tokens."""
@@ -124,8 +206,15 @@ class TranslationConfig:
     model_cache_dir: Optional[str] = None
     allow_model_download: bool = True
     local_files_only: bool = False
+    default_style: TranslationStyle = TranslationStyle.SENTENCE
 
     def __post_init__(self) -> None:
+        try:
+            self.default_style = TranslationStyle(self.default_style)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "default_style must be 'sentence' or 'phrase'"
+            ) from exc
         if self.precision not in ("auto", "float16", "float32"):
             raise ValueError(
                 f"precision must be 'auto', 'float16', or 'float32', got '{self.precision}'"

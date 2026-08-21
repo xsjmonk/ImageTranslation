@@ -173,10 +173,12 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
 
             source_lang = req.source_language or runtime.config.translation.source_language
             target_lang = req.target_language or runtime.config.translation.target_language
+            style = req.style
 
             if req.format == "html":
                 return await _translate_html(
-                    runtime, translator, req, source_lang, target_lang, correlation_id
+                    runtime, translator, req, source_lang, target_lang,
+                    correlation_id, style
                 )
             return await _translate_plain(
                 runtime,
@@ -184,6 +186,7 @@ def create_app(runtime: TranslationRuntime) -> FastAPI:
                 source_lang,
                 target_lang,
                 correlation_id,
+                style,
             )
 
     # ------------------------------------------------------------------
@@ -235,11 +238,12 @@ def _http(
 
 
 async def _translate_plain(
-    service, req: TranslateRequest, source_lang: str, target_lang: str, correlation_id: str
+    service, req: TranslateRequest, source_lang: str, target_lang: str,
+    correlation_id: str, style: str = "sentence",
 ) -> TranslateResponse:
     try:
         result = await run_in_threadpool(
-            service.translate_plain, req.text, source_lang, target_lang
+            service.translate_plain, req.text, source_lang, target_lang, style
         )
     except TranslationInputError as e:
         raise _http(400, str(e), correlation_id, "invalid_input") from e
@@ -258,7 +262,7 @@ async def _translate_plain(
 
 async def _translate_html(
     runtime, translator, req: TranslateRequest, source_lang: str, target_lang: str,
-    correlation_id: str,
+    correlation_id: str, style: str = "sentence",
 ) -> TranslateResponse:
     cfg = runtime.config.structured
     if not cfg.enabled:
@@ -276,6 +280,7 @@ async def _translate_html(
             source_lang,
             target_lang,
             correlation_id,
+            style,
         )
     except StructuredTranslationError as e:
         message = str(e)

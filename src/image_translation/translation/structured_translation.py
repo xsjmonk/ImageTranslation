@@ -57,10 +57,16 @@ from .chapter_chunking import (
     collect_blocks,
     segment_blocks,
 )
-from .config import StructuredConfig, TranslationConfig
+from .config import (
+    StructuredConfig,
+    TranslationConfig,
+    TranslationStyle,
+    resolve_translation_style,
+)
 from .exceptions import (
     BatchItemError,
     StructuredTranslationError,
+    TranslationInputError,
     TranslationQualityError,
 )
 from .html_document import HTMLDocument
@@ -205,6 +211,7 @@ class StructuredTranslationResult:
     translated_attributes: int
     source_language: str
     target_language: str
+    style: TranslationStyle = TranslationStyle.SENTENCE
     batch_count: int = 0
     batch_generation_budget: int = 0
     sum_requested_target_tokens: int = 0
@@ -239,6 +246,7 @@ class StructuredTranslationResult:
             "translated_attributes": self.translated_attributes,
             "source_language": self.source_language,
             "target_language": self.target_language,
+            "style": self.style.value,
         }
 
 
@@ -338,6 +346,7 @@ class StructuredTranslator:
         html: str,
         source_lang: str = "zh",
         target_lang: str = "en",
+        style: TranslationStyle | str | None = None,
     ) -> StructuredTranslationResult:
         """Translate an HTML chapter; returns the reconstructed document.
 
@@ -348,6 +357,14 @@ class StructuredTranslator:
         """
         start = time.monotonic()
         correlation_id = uuid.uuid4().hex[:12]
+        try:
+            style = resolve_translation_style(
+                style, self._translation_config.default_style
+            )
+        except (TypeError, ValueError) as exc:
+            raise TranslationInputError(
+                "translation style must be 'sentence' or 'phrase'"
+            ) from exc
         cfg = self._config
         deadline = start + cfg.max_total_seconds
 
@@ -462,7 +479,7 @@ class StructuredTranslator:
             # Per-segment REQUIRED target budgets (never lowered) and the
             # documented quantized bucket actually passed to generation.
             budgets = {
-                id(seg): self._target_budget(seg.token_count)
+                id(seg): self._target_budget(seg.token_count, style)
                 for seg in chunk
             }
             buckets = {
@@ -500,7 +517,7 @@ class StructuredTranslator:
 
                 try:
                     outputs = self._call_model(
-                        texts, src_lang, tgt_lang, group_budget, deadline
+                        texts, src_lang, tgt_lang, group_budget, deadline, style
                     )
                     item_outputs: Optional[dict] = {
                         i: out for i, out in enumerate(outputs)
@@ -584,7 +601,8 @@ class StructuredTranslator:
                             f"no partial output returned"
                         )
                     ok, translated, retried, fell_back = self._recover_segment(
-                        seg, budgets[id(seg)], deadline, first_text=failed_out
+                        seg, budgets[id(seg)], deadline, first_text=failed_out,
+                        style=style,
                     )
                     retry_count += retried
                     fallback_count += fell_back
@@ -656,6 +674,7 @@ class StructuredTranslator:
             translated_attributes=len(attr_segments),
             source_language=source_lang,
             target_language=target_lang,
+            style=style,
             segments=[s.to_dict() for s in all_segments],
             metrics=metrics,
         )
@@ -736,10 +755,22 @@ class StructuredTranslator:
 
     # ------------------------------------------------------------------
 
-    def _target_budget(self, source_tokens: int) -> int:
+    def _target_budget(
+        self,
+        source_tokens: int,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
+    ) -> int:
         """Safe per-segment target budget (configurable, never assumed 256)."""
         cfg = self._config
-        return min(cfg.max_target_tokens, max(64, int(source_tokens * 2.5)))
+        policy = self._translation_config.generation.resolve_style(
+            style, max(1, source_tokens)
+        )
+        if policy.style is TranslationStyle.SENTENCE:
+            return min(cfg.max_target_tokens, max(64, int(source_tokens * 2.5)))
+        return min(
+            cfg.max_target_tokens,
+            max(policy.min_new_tokens, int(source_tokens * policy.target_token_multiplier)),
+        )
 
     def _translate_segment(
         self, seg: Segment, target_budget: int, deadline: float
@@ -767,6 +798,7 @@ class StructuredTranslator:
         target_budget: int,
         deadline: float,
         first_text: Optional[str] = None,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
     ) -> tuple:
         """Validate ``first_text`` (or make a fresh single call), then
         retry with a stricter placeholder prefix, then split fallback.
@@ -780,7 +812,7 @@ class StructuredTranslator:
         if text is None:
             text = self._call_model(
                 [seg.source_text], seg.source_language, seg.target_language,
-                target_budget, deadline,
+                target_budget, deadline, style,
             )[0]
         check = seg.protected_map.validate_output(
             text, expected_order=seg.placeholder_order
@@ -792,20 +824,23 @@ class StructuredTranslator:
 
         # Retry: stricter placeholder representation (fresh random prefix)
         for attempt in range(1, self._config.max_retries_per_segment + 1):
-            new_text = self._retry_stricter_prefix(seg, target_budget, deadline)
+            new_text = self._retry_stricter_prefix(
+                seg, target_budget, deadline, style
+            )
             if new_text is not None:
                 return True, new_text, attempt, 0
 
         # Split fallback: translate each chinese run alone (protected runs
         # and tags are re-interleaved verbatim)
-        translated = self._split_fallback(seg, target_budget, deadline)
+        translated = self._split_fallback(seg, target_budget, deadline, style)
         if translated is not None:
             return True, translated, self._config.max_retries_per_segment, 1
 
         return False, "", self._config.max_retries_per_segment, 1
 
     def _retry_stricter_prefix(
-        self, seg: Segment, target_budget: int, deadline: float
+        self, seg: Segment, target_budget: int, deadline: float,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
     ) -> Optional[str]:
         """Re-translate with a fresh random placeholder prefix.
 
@@ -835,7 +870,7 @@ class StructuredTranslator:
 
         text = self._call_model(
             [new_source], seg.source_language, seg.target_language,
-            target_budget, deadline,
+            target_budget, deadline, style,
         )[0]
         check = new_pmap.validate_output(
             text, expected_order=[remapped[t] for t in seg.placeholder_order]
@@ -850,7 +885,8 @@ class StructuredTranslator:
             text = text.replace(new, old)
         return text
     def _split_fallback(
-        self, seg: Segment, target_budget: int, deadline: float
+        self, seg: Segment, target_budget: int, deadline: float,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
     ) -> Optional[str]:
         """Translate each chinese run independently (no surrounding
         placeholders); protected runs and tags are re-interleaved verbatim.
@@ -872,7 +908,7 @@ class StructuredTranslator:
             protected = protect_identifiers(run.raw, pmap)
             text = self._call_model(
                 [protected], seg.source_language, seg.target_language,
-                target_budget, deadline,
+                target_budget, deadline, style,
             )[0]
             check = pmap.validate_output(text)
             if not check["ok"]:
@@ -897,6 +933,7 @@ class StructuredTranslator:
         target_lang: str,
         target_budget: int,
         deadline: float,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
     ) -> List[str]:
         """Call the shared translator's batch interface (never HTTP).
 
@@ -912,12 +949,14 @@ class StructuredTranslator:
             )
         start = time.monotonic()
         try:
-            results = self._translator.translate_batch_texts(
-                texts,
-                source_lang=source_lang,
-                target_lang=target_lang,
-                max_new_tokens=target_budget,
-            )
+            kwargs = {
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "max_new_tokens": target_budget,
+            }
+            if style is not TranslationStyle.SENTENCE:
+                kwargs["style"] = style
+            results = self._translator.translate_batch_texts(texts, **kwargs)
         except TranslationQualityError:
             raise
         except Exception as e:
@@ -959,9 +998,12 @@ def translate_html(
     source_lang: str = "zh",
     target_lang: str = "en",
     document_id: str = "doc",
+    style: TranslationStyle = TranslationStyle.SENTENCE,
 ) -> StructuredTranslationResult:
     """Convenience one-call entry point for the structured path."""
     st = StructuredTranslator(
         translator, structured_config, translation_config, document_id=document_id
     )
-    return st.translate(html, source_lang=source_lang, target_lang=target_lang)
+    return st.translate(
+        html, source_lang=source_lang, target_lang=target_lang, style=style
+    )

@@ -29,6 +29,9 @@ class TranslateRequest(BaseModel):
     target_language: Optional[str] = Field(
         None, description="Optional target language code; defaults to server configuration"
     )
+    style: Optional[Literal["sentence", "phrase"]] = Field(
+        None, description="Translation style; defaults to server configuration"
+    )
 
 
 class TranslateResponse(BaseModel):

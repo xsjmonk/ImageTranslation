@@ -12,6 +12,7 @@ class TranslationRequest:
     text: str
     source_language: str = "zh"
     target_language: str = "en"
+    style: str = "sentence"
 
 
 @dataclass
@@ -24,6 +25,7 @@ class TranslationResult:
     translated_text: str = ""
     source_language: str = "zh"
     target_language: str = "en"
+    style: str = "sentence"
     model_name: str = ""
     device: str = ""
     # Legacy fields for ImageTranslation pipeline compatibility

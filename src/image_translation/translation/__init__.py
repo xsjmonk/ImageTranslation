@@ -8,6 +8,9 @@ from .config import (
     GenerationConfig,
     QualityConfig,
     StructuredConfig,
+    TranslationStyle,
+    ResolvedGenerationPolicy,
+    resolve_translation_style,
 )
 from .exceptions import (
     StructuredTranslationError,
@@ -33,6 +36,11 @@ from .structured_translation import (
     translate_html,
 )
 from .text_utils import preprocess
+from .phrase_policy import (
+    PhraseValidationResult,
+    content_token_count,
+    validate_phrase_output,
+)
 from .translator import NoopTranslator
 
 __all__ = [
@@ -43,6 +51,9 @@ __all__ = [
     "GenerationConfig",
     "QualityConfig",
     "StructuredConfig",
+    "TranslationStyle",
+    "ResolvedGenerationPolicy",
+    "resolve_translation_style",
     # Models
     "TranslationRequest",
     "TranslationResult",
@@ -65,6 +76,9 @@ __all__ = [
     # Utilities
     "classify_regions",
     "preprocess",
+    "PhraseValidationResult",
+    "content_token_count",
+    "validate_phrase_output",
     # Structured (HTML-aware) translation
     "HTMLDocument",
     "compare_document_structure",

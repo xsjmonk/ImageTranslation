@@ -9,7 +9,8 @@ import time
 from typing import List, Optional, Sequence
 
 from .base import Translator
-from .config import TranslationConfig
+from .config import TranslationConfig, resolve_translation_style
+from .config import TranslationStyle
 from .exceptions import (
     TranslationConfigurationError,
     TranslationDeviceError,
@@ -20,6 +21,7 @@ from .exceptions import (
 )
 from .model_adapters import create_model_family_adapter
 from .models import ResolvedModel, TranslationResult, TranslationRuntimeInfo
+from .phrase_policy import validate_phrase_output
 from .text_utils import preprocess
 
 logger = logging.getLogger(__name__)
@@ -96,12 +98,18 @@ class Seq2SeqTranslator(Translator):
         return dict(self._last_quality_diagnostics)
 
     def translate_text(
-        self, text: str, source_lang: str = "zh", target_lang: str = "en"
+        self, text: str, source_lang: str = "zh", target_lang: str = "en",
+        style: TranslationStyle | str | None = None,
     ) -> TranslationResult:
         """Translate a single string."""
+        style = resolve_translation_style(style, self._config.default_style)
         self._ensure_loaded()
         cleaned = preprocess(text, max_characters=self._config.max_input_characters)
-        return self._translate_impl([cleaned], source_lang, target_lang)[0]
+        if style is TranslationStyle.SENTENCE:
+            return self._translate_impl([cleaned], source_lang, target_lang)[0]
+        return self._translate_impl(
+            [cleaned], source_lang, target_lang, style=style
+        )[0]
 
     def translate_batch_texts(
         self,
@@ -109,6 +117,7 @@ class Seq2SeqTranslator(Translator):
         source_lang: str = "zh",
         target_lang: str = "en",
         max_new_tokens: int | None = None,
+        style: TranslationStyle | str | None = None,
     ) -> List[TranslationResult]:
         """Translate multiple strings with real GPU batching.
 
@@ -117,6 +126,7 @@ class Seq2SeqTranslator(Translator):
         """
         if not texts:
             return []
+        style = resolve_translation_style(style, self._config.default_style)
         self._ensure_loaded()
 
         cleaned = [
@@ -128,10 +138,11 @@ class Seq2SeqTranslator(Translator):
         batch_size = self._config.batch_size
         for i in range(0, len(cleaned), batch_size):
             chunk = cleaned[i : i + batch_size]
+            kwargs = {"max_new_tokens": max_new_tokens}
+            if style is not TranslationStyle.SENTENCE:
+                kwargs["style"] = style
             results.extend(
-                self._translate_impl(
-                    chunk, source_lang, target_lang, max_new_tokens=max_new_tokens
-                )
+                self._translate_impl(chunk, source_lang, target_lang, **kwargs)
             )
         # Final accumulated-count invariant: the plain batch path must never
         # silently return fewer (or more) translations than requested.
@@ -451,6 +462,7 @@ class Seq2SeqTranslator(Translator):
         target_lang: str,
         max_new_tokens: int | None = None,
         _retry: bool = False,
+        style: TranslationStyle = TranslationStyle.SENTENCE,
     ) -> List[TranslationResult]:
         """Translate a chunk of texts in one GPU batch.
 
@@ -477,10 +489,21 @@ class Seq2SeqTranslator(Translator):
 
             actual_tokens = encoded["input_ids"].shape[1]
             gen_cfg = self._config.generation
-            target_budget = gen_cfg.target_budget(
-                actual_tokens, explicit=max_new_tokens
+            policy = gen_cfg.resolve_style(style, actual_tokens)
+            target_budget = (
+                min(policy.max_new_tokens, max(policy.min_new_tokens, max_new_tokens))
+                if max_new_tokens is not None
+                else min(
+                    policy.max_new_tokens,
+                    max(
+                        policy.min_new_tokens,
+                        __import__("math").ceil(
+                            actual_tokens * policy.target_token_multiplier
+                        ),
+                    ),
+                )
             )
-            num_beams = gen_cfg.retry_num_beams if _retry else gen_cfg.num_beams
+            num_beams = policy.retry_num_beams if _retry else policy.num_beams
 
             # --- Explicit over-budget rejection: no silent truncation ---
             # The structured path validates budgets before generation; this
@@ -510,6 +533,7 @@ class Seq2SeqTranslator(Translator):
                 "unknown_tokens": unknown_tokens,
                 "source_language": source_lang,
                 "target_language": target_lang,
+                "style": policy.style.value,
                 "model_name": self._config.model_name,
                 "model_revision": self._config.model_revision,
                 "device": self._device_str,
@@ -517,8 +541,8 @@ class Seq2SeqTranslator(Translator):
                 "generation": {
                     "max_new_tokens": target_budget,
                     "num_beams": num_beams,
-                    "length_penalty": gen_cfg.length_penalty,
-                    "early_stopping": gen_cfg.early_stopping,
+                    "length_penalty": policy.length_penalty,
+                    "early_stopping": policy.early_stopping,
                 },
             }
             if unknown_count:
@@ -593,12 +617,12 @@ class Seq2SeqTranslator(Translator):
                     target_lang,
                     max_new_tokens=target_budget,
                     num_beams=num_beams,
-                    do_sample=gen_cfg.do_sample,
-                    no_repeat_ngram_size=gen_cfg.no_repeat_ngram_size,
+                    do_sample=policy.do_sample,
+                    no_repeat_ngram_size=policy.no_repeat_ngram_size,
                 ),
-                "length_penalty": gen_cfg.length_penalty,
+                "length_penalty": policy.length_penalty,
                 "early_stopping": (
-                    gen_cfg.early_stopping if num_beams > 1 else False
+                    policy.early_stopping if num_beams > 1 else False
                 ),
             }
             # Clear a legacy max_length so the adaptive max_new_tokens policy is the sole
@@ -609,7 +633,7 @@ class Seq2SeqTranslator(Translator):
                 model_generation_config, "max_length", None
             ) is not None:
                 model_generation_config.max_length = None
-            if not gen_cfg.do_sample:
+            if not policy.do_sample:
                 # Beam search is configured without sampling, but resetting
                 # CUDA RNG state also removes backend tie-break variability
                 # across repeated calls through direct/API adapters.
@@ -646,6 +670,41 @@ class Seq2SeqTranslator(Translator):
             }
         )
 
+        phrase_invalid = []
+        if policy.style is TranslationStyle.PHRASE and policy.scaffolding_policy != "off":
+            for index, decoded_text in enumerate(decoded):
+                check = validate_phrase_output(
+                    texts[index],
+                    decoded_text,
+                    max_expansion_ratio=policy.max_expansion_ratio or 3.0,
+                )
+                if not check.accepted:
+                    phrase_invalid.append((index, check))
+            self._last_quality_diagnostics["phrase"] = {
+                "style": policy.style.value,
+                "invalid_items": [i for i, _ in phrase_invalid],
+                "reasons": [r for _, c in phrase_invalid for r in c.reasons],
+            }
+        if phrase_invalid:
+            if policy.scaffolding_policy == "warn":
+                logger.warning(
+                    "[QUALITY] phrase policy warning: %s",
+                    self._last_quality_diagnostics["phrase"],
+                )
+            elif policy.scaffolding_policy == "retry" and not _retry:
+                return self._translate_impl(
+                    texts, source_lang, target_lang,
+                    max_new_tokens=min(target_budget, policy.retry_max_new_tokens),
+                    _retry=True, style=policy.style,
+                )
+            else:
+                raise TranslationQualityError(
+                    "phrase output failed configured quality policy: "
+                    + ", ".join(
+                        sorted({reason for _, check in phrase_invalid for reason in check.reasons})
+                    )
+                )
+
         degenerate = [
             index
             for index, text in enumerate(decoded)
@@ -680,6 +739,7 @@ class Seq2SeqTranslator(Translator):
                     target_lang,
                     max_new_tokens=retry_budget,
                     _retry=True,
+                    style=policy.style,
                 )
             raise TranslationQualityError(
                 "translation output failed degeneration checks after "
@@ -702,6 +762,7 @@ class Seq2SeqTranslator(Translator):
                     translated_text=translated,
                     source_language=source_lang,
                     target_language=target_lang,
+                    style=policy.style.value,
                     model_name=self._config.model_name,
                     device=device_str,
                     compact_text=translated,

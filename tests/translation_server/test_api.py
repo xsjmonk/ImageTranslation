@@ -28,6 +28,7 @@ class FakeTranslator(Translator):
     def __init__(self, ready: bool = True, max_input_characters: int = 4000) -> None:
         self._ready = ready
         self._max = max_input_characters
+        self.styles = []
 
     @property
     def name(self) -> str:
@@ -54,9 +55,11 @@ class FakeTranslator(Translator):
         """Token count used by HTML segmentation (no model call)."""
         return max(1, (len(text) + 1) // 2)
     def translate_text(
-        self, text: str, source_lang: str = "zh", target_lang: str = "en"
+        self, text: str, source_lang: str = "zh", target_lang: str = "en",
+        style=None,
     ) -> TranslationResult:
         cleaned = preprocess(text, max_characters=self._max)
+        self.styles.append(style)
         return TranslationResult(
             source_text=cleaned,
             translated_text=f"[EN] {cleaned}",
@@ -64,12 +67,17 @@ class FakeTranslator(Translator):
             target_language=target_lang,
             model_name="fake",
             device="cpu",
+            style=getattr(style, "value", style) or "sentence",
         )
 
     def translate_batch_texts(
-        self, texts, source_lang: str = "zh", target_lang: str = "en"
+        self, texts, source_lang: str = "zh", target_lang: str = "en",
+        max_new_tokens=None, style=None
     ):
-        return [self.translate_text(t, source_lang, target_lang) for t in texts]
+        return [
+            self.translate_text(t, source_lang, target_lang, style)
+            for t in texts
+        ]
 
     def warmup(self) -> None:
         pass
@@ -82,9 +90,9 @@ class SlowTranslator(FakeTranslator):
         super().__init__()
         self._delay = delay
 
-    def translate_text(self, text, source_lang="zh", target_lang="en"):
+    def translate_text(self, text, source_lang="zh", target_lang="en", style=None):
         time.sleep(self._delay)
-        return super().translate_text(text, source_lang, target_lang)
+        return super().translate_text(text, source_lang, target_lang, style)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +217,7 @@ class TestTranslate:
 class TestErrorSemantics:
     def test_device_unavailable_503(self):
         class DeviceFailTranslator(FakeTranslator):
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(self, text, source_lang="zh", target_lang="en", style=None):
                 raise TranslationDeviceError("CUDA unavailable")
 
         c = _make_client(DeviceFailTranslator())
@@ -220,7 +228,7 @@ class TestErrorSemantics:
 
     def test_model_load_failure_503(self):
         class ModelFailTranslator(FakeTranslator):
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(self, text, source_lang="zh", target_lang="en", style=None):
                 raise TranslationModelLoadError("model weights missing")
 
         c = _make_client(ModelFailTranslator())
@@ -229,7 +237,7 @@ class TestErrorSemantics:
 
     def test_unexpected_error_500(self):
         class CrashTranslator(FakeTranslator):
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(self, text, source_lang="zh", target_lang="en", style=None):
                 raise RuntimeError("boom: internal detail")
 
         c = _make_client(CrashTranslator())

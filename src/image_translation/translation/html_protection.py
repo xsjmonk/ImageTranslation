@@ -20,6 +20,12 @@ DEFAULT_PREFIX = "__ITRANSLATE_"
 # alnum + _), each followed by <kind letter><4 digits>_. Used to reject
 # model-invented placeholder-like tokens that are not registered.
 _PLACEHOLDER_TOKEN_RE = re.compile(r"__IT[A-Za-z0-9]{0,16}_[A-Z]\d{4}_")
+PLACEHOLDER_TOKEN_RE = _PLACEHOLDER_TOKEN_RE
+
+
+def is_placeholder_token(value: str) -> bool:
+    """Return whether value is one complete project placeholder token."""
+    return bool(PLACEHOLDER_TOKEN_RE.fullmatch(value))
 
 
 class ProtectedSpan:

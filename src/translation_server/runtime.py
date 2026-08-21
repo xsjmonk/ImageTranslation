@@ -18,6 +18,10 @@ from image_translation.translation import (
     Translator,
     create_translator,
 )
+from image_translation.translation.config import (
+    TranslationStyle,
+    resolve_translation_style,
+)
 
 from .config import TranslationServerConfig, load_server_config
 
@@ -64,12 +68,18 @@ class TranslationRuntime:
         self.translator.warmup()  # type: ignore[union-attr]
 
     def translate_plain(
-        self, text: str, source_language: str, target_language: str
+        self, text: str, source_language: str, target_language: str,
+        style: TranslationStyle | str | None = None,
     ):
         """Run plain translation through the runtime-owned service path."""
         with self._structured_invocations_lock:
             self._plain_invocations += 1
-        return self.translator.translate_text(text, source_language, target_language)
+        resolved_style = resolve_translation_style(
+            style, self.config.translation.default_style
+        )
+        return self.translator.translate_text(
+            text, source_language, target_language, style=resolved_style
+        )
 
     @property
     def plain_invocation_count(self) -> int:
@@ -82,16 +92,23 @@ class TranslationRuntime:
         source_language: str,
         target_language: str,
         document_id: str,
+        style: TranslationStyle | str | None = None,
     ) -> StructuredTranslationResult:
         """Translate HTML through the runtime-owned shared service path."""
         with self._structured_invocations_lock:
             self._structured_invocations += 1
+        resolved_style = resolve_translation_style(
+            style, self.config.translation.default_style
+        )
         result = StructuredTranslator(
             self.translator,
             self.config.structured,
             self.config.translation,
             document_id=document_id,
-        ).translate(text, source_language, target_language)
+        ).translate(
+            text, source_language, target_language,
+            resolved_style,
+        )
         with self._structured_invocations_lock:
             self._structured_diagnostics.append(
                 {

@@ -167,6 +167,14 @@ target budget from measured source tokens, caps compact inputs at
 when repeated or unbounded output is detected. A second failure is discarded
 and reported as a quality error; repeated text is never returned as success.
 
+### Translation style
+
+Requests may set `"style": "sentence"` (the default) or `"style": "phrase"`.
+Sentence preserves the existing natural-translation policy; phrase uses a
+shorter target budget and a conservative expansion warning. Style is resolved
+in the shared generation policy and applies equally to direct, plain HTTP, and
+HTML translation. Invalid values are rejected by the API.
+
 ### Model cache location and offline mode
 
 The model download location is a server deployment setting:

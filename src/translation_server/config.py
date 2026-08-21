@@ -249,6 +249,21 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         ),
         retry_num_beams=gen_raw.get("retry_num_beams", 1),
         retry_max_new_tokens=gen_raw.get("retry_max_new_tokens", 64),
+        phrase_target_token_multiplier=gen_raw.get(
+            "styles", {}
+        ).get("phrase", {}).get("target_token_multiplier", 1.5),
+        phrase_short_text_max_new_tokens=gen_raw.get(
+            "styles", {}
+        ).get("phrase", {}).get("short_text_max_new_tokens", 32),
+        phrase_length_penalty=gen_raw.get("styles", {}).get(
+            "phrase", {}
+        ).get("length_penalty", 0.8),
+        phrase_max_expansion_ratio=gen_raw.get("styles", {}).get(
+            "phrase", {}
+        ).get("max_expansion_ratio", 3.0),
+        phrase_scaffolding_policy=gen_raw.get("styles", {}).get(
+            "phrase", {}
+        ).get("scaffolding_policy", "warn"),
     )
     quality_raw = raw.get("quality", {})
     quality = QualityConfig(
@@ -292,6 +307,7 @@ def load_server_config(path: Optional[Path] = None) -> TranslationServerConfig:
         local_files_only=trans_raw.get(
             "offline", trans_raw.get("local_files_only", False)
         ),
+        default_style=trans_raw.get("default_style", "sentence"),
     )
 
     config = TranslationServerConfig(

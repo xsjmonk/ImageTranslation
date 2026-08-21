@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Sequence
 
 from ..models.text_region import TextRegion
 from .models import TranslationResult
+from .config import TranslationStyle
 
 
 class Translator(ABC):
@@ -20,7 +21,8 @@ class Translator(ABC):
 
     @abstractmethod
     def translate_text(
-        self, text: str, source_lang: str = "zh", target_lang: str = "en"
+        self, text: str, source_lang: str = "zh", target_lang: str = "en",
+        style: TranslationStyle | str | None = None
     ) -> TranslationResult:
         """Translate a single string.
 
@@ -41,6 +43,7 @@ class Translator(ABC):
         source_lang: str = "zh",
         target_lang: str = "en",
         max_new_tokens: int | None = None,
+        style: TranslationStyle | str | None = None,
     ) -> List[TranslationResult]:
         """Translate multiple strings in one batch.
 
