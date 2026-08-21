@@ -44,14 +44,20 @@ class FakeTranslator(Translator):
     def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
         """Token count used by HTML segmentation (no model call)."""
         return max(1, (len(text) + 1) // 2)
-    def translate_text(self, text, source_lang="zh", target_lang="en",
-                       max_new_tokens=None):
+    def translate_text(
+        self,
+        text,
+        source_lang="zh",
+        target_lang="en",
+        max_new_tokens=None,
+        style=None,
+    ):
         return self.translate_batch_texts(
-            [text], source_lang, target_lang, max_new_tokens
+            [text], source_lang, target_lang, max_new_tokens, style=style
         )[0]
 
     def translate_batch_texts(self, texts, source_lang="zh", target_lang="en",
-                              max_new_tokens=None):
+                              max_new_tokens=None, style=None):
         out = []
         for t in texts:
             parts = re.split(r"(__ITRANSLATE_[A-Z]\d{4}_)", t)
@@ -223,7 +229,7 @@ class TestAdversarialEntityFakes:
         the output is exact, never partial."""
         class DropEntityFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -252,7 +258,7 @@ class TestAdversarialEntityFakes:
         restores exactly one occurrence per source position."""
         class DupEntityFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -328,7 +334,7 @@ class TestAdversarialEntityFakes:
         real break tag — the serializer escapes it."""
         class EmitBrFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -384,7 +390,7 @@ class TestAdversarialEntityFakes:
         with a structured error — no partial HTML is returned."""
         class CrashFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 raise RuntimeError("gpu exploded")
 
         html = "<p>中文&nbsp;English</p>"
@@ -399,7 +405,7 @@ class TestAdversarialEntityFakes:
         tags, and nothing partial is returned."""
         class ReorderTagFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -434,7 +440,7 @@ class TestAdversarialEntityFakes:
     def test_model_emitted_entity_text_is_escaped(self):
         class EmitEntityFake(FakeTranslator):
             def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+                                      target_lang="en", max_new_tokens=None, style=None):
                 out = []
                 for t in texts:
                     self.call_count += 1

@@ -48,13 +48,25 @@ class FakeTranslator(Translator):
     def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
         """Token count used by HTML segmentation (no model call)."""
         return max(1, (len(text) + 1) // 2)
-    def translate_text(self, text, source_lang="zh", target_lang="en", max_new_tokens=None):
+    def translate_text(
+        self,
+        text,
+        source_lang="zh",
+        target_lang="en",
+        max_new_tokens=None,
+        style=None,
+    ):
         return self.translate_batch_texts(
-            [text], source_lang, target_lang, max_new_tokens
+            [text], source_lang, target_lang, max_new_tokens, style=style
         )[0]
 
     def translate_batch_texts(
-        self, texts, source_lang="zh", target_lang="en", max_new_tokens=None
+        self,
+        texts,
+        source_lang="zh",
+        target_lang="en",
+        max_new_tokens=None,
+        style=None,
     ):
         out = []
         with self._lock:
@@ -128,7 +140,14 @@ class TestMixedGrouping:
         not affect the output — English is protected before inference and
         restored from the ORIGINAL text."""
         class ChangeEnglishFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -179,8 +198,14 @@ class TestMixedGrouping:
         English word to GARBAGE must not affect the output — all protected
         categories are restored from the ORIGINAL source text."""
         class TotalCorruptionFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -239,8 +264,14 @@ class TestMixedGrouping:
         model's attempts can never REPLACE them (protected identifiers never
         reach the model as free text)."""
         class OverrideFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh",
-                                      target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 out = []
                 for t in texts:
                     self.call_count += 1
@@ -443,7 +474,14 @@ class TestInjectionSafety:
     def test_fake_html_placeholder_validation(self):
         """Model emitting raw HTML does not create new tags."""
         class HtmlEmittingFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 return [
                     TranslationResult(
                         source_text=t,
@@ -508,9 +546,22 @@ class TestTranslatableAttributes:
 class TestDeadline:
     def test_deadline_exceeded_fails(self):
         class SlowFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 time.sleep(0.3)
-                return super().translate_batch_texts(texts, source_lang, target_lang, max_new_tokens)
+                return super().translate_batch_texts(
+                    texts,
+                    source_lang,
+                    target_lang,
+                    max_new_tokens,
+                    style=style,
+                )
 
         fake = SlowFake()
         cfg = StructuredConfig(max_total_seconds=0.15, max_segment_tokens=60, batch_size=4)
@@ -525,9 +576,22 @@ class TestDeadline:
 
     def test_warning_threshold_is_not_cancel(self):
         class SlowFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 time.sleep(0.1)
-                return super().translate_batch_texts(texts, source_lang, target_lang, max_new_tokens)
+                return super().translate_batch_texts(
+                    texts,
+                    source_lang,
+                    target_lang,
+                    max_new_tokens,
+                    style=style,
+                )
 
         fake = SlowFake()
         cfg = StructuredConfig(segment_warning_seconds=0.05, max_total_seconds=10)
@@ -736,10 +800,20 @@ class TestPlaceholderCorruptionProperty:
         outcomes = {"ok": 0, "error": 0}
         for _ in range(40):
             class CorruptingFake(FakeTranslator):
-                def translate_batch_texts(self, texts, source_lang="zh",
-                                          target_lang="en", max_new_tokens=None):
+                def translate_batch_texts(
+                    self,
+                    texts,
+                    source_lang="zh",
+                    target_lang="en",
+                    max_new_tokens=None,
+                    style=None,
+                ):
                     base = FakeTranslator().translate_batch_texts(
-                        texts, source_lang, target_lang, max_new_tokens
+                        texts,
+                        source_lang,
+                        target_lang,
+                        max_new_tokens,
+                        style=style,
                     )
                     return [
                         TranslationResult(

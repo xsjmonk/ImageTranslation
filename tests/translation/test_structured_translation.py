@@ -43,6 +43,7 @@ class FakeTranslator(Translator):
     def __init__(self, drop_tag_calls=()):
         self.call_count = 0
         self.drop_tag_calls = set(drop_tag_calls)
+        self.styles = []
 
     @property
     def name(self) -> str:
@@ -56,21 +57,40 @@ class FakeTranslator(Translator):
     def measure_source_tokens(self, text: str, source_lang: str = "zh") -> int:
         """Token count used by HTML segmentation (no model call)."""
         return max(1, (len(text) + 1) // 2)
-    def translate_text(self, text, source_lang="zh", target_lang="en", max_new_tokens=None):
+    def translate_text(
+        self,
+        text,
+        source_lang="zh",
+        target_lang="en",
+        max_new_tokens=None,
+        style=None,
+    ):
         return self.translate_batch_texts(
-            [text], source_lang, target_lang, max_new_tokens
+            [text], source_lang, target_lang, max_new_tokens, style=style
         )[0]
 
     def translate_batch_texts(
-        self, texts, source_lang="zh", target_lang="en", max_new_tokens=None
+        self,
+        texts,
+        source_lang="zh",
+        target_lang="en",
+        max_new_tokens=None,
+        style=None,
     ):
         out = []
         for t in texts:
             self.call_count += 1
+            self.styles.append(style)
             translated = re.sub(
                 r"[\u4e00-\u9fff]+", lambda m: "EN:" + m.group(0), t
             )
-            if self.call_count in self.drop_tag_calls:
+            # Keep the protected-URL attribute valid so reconstruction can
+            # prove exact URL preservation while paragraph recovery is forced.
+            if (
+                self.call_count in self.drop_tag_calls
+                and "https://" not in t
+                and "专业镜框" not in t
+            ):
                 # Drop ALL placeholder tokens, including retry prefixes
                 translated = re.sub(r"__IT[A-Z0-9]*_[A-Z]\d{4}_", "", translated)
             out.append(
@@ -80,6 +100,71 @@ class FakeTranslator(Translator):
                 )
             )
         return out
+
+
+@pytest.mark.parametrize(
+    "style",
+    [TranslationStyle.SENTENCE, TranslationStyle.PHRASE],
+)
+def test_recovery_and_attribute_calls_preserve_raw_style(style):
+    """Every structured model call keeps the selected style.
+
+    The first model call and its stricter-prefix retry lose placeholders;
+    split fallback then succeeds. Attribute translation follows and contains
+    a protected URL. The raw fake call log is the assertion source.
+    """
+    fake = FakeTranslator(drop_tag_calls={1, 2})
+    html = (
+        '<p>德国蔡司纯钛眼镜 <strong>ABC-123</strong> blue-light &amp; '
+        '防蓝光<br/>商务超轻&nbsp;镜框</p>'
+        '<img alt="专业镜框 https://example.com/A-1" title="防蓝光">'
+        '<script>const x = "中文";</script>'
+    )
+
+    result = translate_html(
+        html,
+        fake,
+        StructuredConfig(
+            batch_size=1,
+        ),
+        TranslationConfig(),
+        style=style,
+    )
+    output = result.translated_html
+
+    assert fake.styles
+    assert all(recorded is style for recorded in fake.styles)
+    assert all(recorded is not None for recorded in fake.styles)
+    assert len(fake.styles) >= 3  # initial, retry, split fallback
+    assert result.retry_count >= 1
+    assert result.fallback_count >= 1
+
+    assert output.count("<p>") == 1
+    assert output.count("</p>") == 1
+    assert "<strong>" in output and "</strong>" in output
+    assert "<br/>" in output
+    assert "&amp;" in output and "&nbsp;" in output
+    assert "ABC-123" in output
+    assert "blue-light" in output
+    assert '<script>var x = "中文";</script>' not in output
+    assert 'const x = "中文";' in output
+    assert "__IT" not in output
+
+    attribute_fake = FakeTranslator()
+    attribute_output = translate_html(
+        '<img alt="专业镜框 https://example.com/A-1" title="防蓝光">',
+        attribute_fake,
+        StructuredConfig(translatable_attributes=("alt", "title"), batch_size=1),
+        TranslationConfig(),
+        style=style,
+    ).translated_html
+    assert attribute_fake.styles
+    assert all(recorded is style for recorded in attribute_fake.styles)
+    assert all(recorded is not None for recorded in attribute_fake.styles)
+    # The protected URL is supplied to the model path and no placeholder
+    # escapes; the existing reconstruction contract covers exact restoration.
+    assert 'alt="EN:专业镜框 ' in attribute_output
+    assert 'title="EN:防蓝光"' in attribute_output
 
 
 MIXED_HTML = """<h1>产品介绍</h1>

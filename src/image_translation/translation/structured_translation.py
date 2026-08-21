@@ -954,8 +954,7 @@ class StructuredTranslator:
                 "target_lang": target_lang,
                 "max_new_tokens": target_budget,
             }
-            if style is not TranslationStyle.SENTENCE:
-                kwargs["style"] = style
+            kwargs["style"] = style
             results = self._translator.translate_batch_texts(texts, **kwargs)
         except TranslationQualityError:
             raise
@@ -998,7 +997,7 @@ def translate_html(
     source_lang: str = "zh",
     target_lang: str = "en",
     document_id: str = "doc",
-    style: TranslationStyle = TranslationStyle.SENTENCE,
+    style: TranslationStyle | str | None = None,
 ) -> StructuredTranslationResult:
     """Convenience one-call entry point for the structured path."""
     st = StructuredTranslator(

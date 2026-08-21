@@ -218,10 +218,23 @@ class TestCacheEndpoint:
                     offline=False,
                 )
 
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(
+                self,
+                text,
+                source_lang="zh",
+                target_lang="en",
+                style=None,
+            ):
                 return TranslationResult(source_text=text, translated_text=text)
 
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en"):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 return [self.translate_text(t) for t in texts]
 
         resp = self._client(ReadyFake()).get("/cache")
@@ -250,10 +263,23 @@ class TestCacheEndpoint:
                 return TranslationRuntimeInfo(
                     model_name="fake", ready=False, cache_status="none")
 
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(
+                self,
+                text,
+                source_lang="zh",
+                target_lang="en",
+                style=None,
+            ):
                 return TranslationResult(source_text=text, translated_text=text)
 
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en"):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 return [self.translate_text(t) for t in texts]
 
         resp = self._client(LazyFake()).get("/cache")
@@ -291,10 +317,23 @@ class TestCacheEndpoint:
             def check_cache(self):
                 return real.check_cache()
 
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(
+                self,
+                text,
+                source_lang="zh",
+                target_lang="en",
+                style=None,
+            ):
                 return TranslationResult(source_text=text, translated_text=text)
 
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en"):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 return [self.translate_text(t) for t in texts]
 
         resp = self._client(Wrapper()).get("/cache")
@@ -324,10 +363,23 @@ class TestCacheEndpoint:
             def check_cache(self):
                 raise TranslationModelLoadError("cache miss")
 
-            def translate_text(self, text, source_lang="zh", target_lang="en"):
+            def translate_text(
+                self,
+                text,
+                source_lang="zh",
+                target_lang="en",
+                style=None,
+            ):
                 return TranslationResult(source_text=text, translated_text=text)
 
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en"):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 return [self.translate_text(t) for t in texts]
 
         resp = self._client(BrokenCache()).get("/cache")

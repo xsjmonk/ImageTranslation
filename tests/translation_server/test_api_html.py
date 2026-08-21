@@ -122,10 +122,17 @@ class TestFormatField:
                 super().__init__()
                 self.calls = []
 
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 self.calls.append((source_lang, target_lang))
                 return super().translate_batch_texts(
-                    texts, source_lang, target_lang, max_new_tokens
+                    texts, source_lang, target_lang, max_new_tokens, style=style
                 )
 
         fake = RecordingFake()
@@ -193,7 +200,14 @@ class TestFormatField:
         runtime = TranslationRuntime(config)
 
         class CrashFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 raise RuntimeError("boom")
 
         runtime._translator = CrashFake()
@@ -224,7 +238,14 @@ class TestHtmlErrors:
         runtime = TranslationRuntime(config)
 
         class CrashFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 raise RuntimeError("gpu oom: internal")
 
         runtime._translator = CrashFake()
@@ -281,7 +302,14 @@ class TestConcurrency:
         lock = threading.Lock()
 
         class SlowFake(FakeTranslator):
-            def translate_batch_texts(self, texts, source_lang="zh", target_lang="en", max_new_tokens=None):
+            def translate_batch_texts(
+                self,
+                texts,
+                source_lang="zh",
+                target_lang="en",
+                max_new_tokens=None,
+                style=None,
+            ):
                 nonlocal in_flight, max_in_flight
                 with lock:
                     in_flight += 1
@@ -289,7 +317,11 @@ class TestConcurrency:
                 time.sleep(0.3)
                 try:
                     return super().translate_batch_texts(
-                        texts, source_lang, target_lang, max_new_tokens
+                        texts,
+                        source_lang,
+                        target_lang,
+                        max_new_tokens,
+                        style=style,
                     )
                 finally:
                     with lock:
