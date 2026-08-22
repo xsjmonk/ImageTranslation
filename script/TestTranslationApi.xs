@@ -35,7 +35,23 @@ func TestTranslation() {
 func Translate(sentence) {
 	string api = "http://127.0.0.1:8091/translate";
 
-	string body = "{\"text\":" & clr.Ex.Json.Serialize(sentence) & ",\"format\":\"html\"}";
+	/*
+	 * Current Translation Server API:
+	 *   POST /translate
+	 *   JSON request:  {"text":"...", "format":"plain", "style":"sentence"}
+	 *   JSON response: {"translation":"..."}
+	 *
+	 * Supported style values:
+	 *   sentence - normal sentence/document translation; the default style.
+	 *   phrase   - concise product-title/label phrase translation; it does
+	 *              not add sentence framing or explanatory wording.
+	 *
+	 * This test sends a plain sentence, so it must use format="plain".
+	 * format="html" is reserved for HTML-aware translation and would route
+	 * this plain input through the structured HTML path.
+	 */
+	string body = "{\"text\":" & clr.Ex.Json.Serialize(sentence)
+		& ",\"format\":\"plain\",\"style\":\"sentence\"}";
 
 	var headers = [
 		new { Name = "Content-Type", Value = "application/json" }
