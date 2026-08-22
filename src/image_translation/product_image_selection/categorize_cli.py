@@ -5,21 +5,36 @@ from .inference import ProductImageClassifier
 from .io.discovery import discover_images
 from .io.raster_pillow import PillowRasterReader
 from .io.results_csv import CsvPredictionWriter
+
+
+def categorize_images(cfg, classifier, reader=None, writer=None):
+    """Application service for deterministic report-before-failure categorization."""
+    reader = reader or PillowRasterReader(cfg.data.inference.max_decoded_pixels)
+    writer = writer or CsvPredictionWriter(cfg.output.csv_path)
+    items, failures = [], []
+    for path in discover_images(cfg.data.inference.image_roots, cfg.data.inference.recursive):
+        try:
+            items.append((str(path), reader.read_rgb_pixels(str(path)), str(path)))
+        except Exception as error:
+            failures.append((str(path), str(path), str(error)))
+    if failures and cfg.data.inference.unreadable_image_policy == "fail":
+        raise RuntimeError(f"{len(failures)} unreadable candidate image(s)")
+    result = classifier.categorize(items)
+    from .domain import CategorizationResult, ImageFailure
+    result = CategorizationResult(
+        result.predictions,
+        result.failures + tuple(ImageFailure(image_id, path, error) for image_id, path, error in failures),
+    )
+    writer.write(result)
+    return result, bool(failures)
+
+
 def main():
     parser=argparse.ArgumentParser(); parser.add_argument("--config",required=True)
     cfg=load_config(parser.parse_args().config)
-    model=build_model(cfg.model.architecture,None)
+    model=build_model(cfg.model.architecture,cfg.model.pretrained_weights)
     metadata=load_checkpoint(cfg.model.checkpoint_path,model,{"architecture":cfg.model.architecture,"pretrained_weights":cfg.model.pretrained_weights,"labels":["not_taken","taken"],"input_size":cfg.model.input_size,"normalization":cfg.model.normalization.model_dump()})
     classifier=ProductImageClassifier(model,cfg,metadata.get("model_version","unknown"),"cpu" if cfg.training.device=="cpu" else None,metadata)
-    reader=PillowRasterReader(cfg.data.inference.max_decoded_pixels); items=[]; failures=[]
-    for path in discover_images(cfg.data.inference.image_roots,cfg.data.inference.recursive):
-        try: items.append((str(path),reader.read_rgb_pixels(str(path))))
-        except Exception as e: failures.append((path.name,str(path),str(e)))
-    if failures and cfg.data.inference.unreadable_image_policy == "fail":
-        raise RuntimeError(f"{len(failures)} unreadable candidate image(s)")
-    result=classifier.categorize(items)
-    from .domain import CategorizationResult, ImageFailure
-    result=CategorizationResult(result.predictions,result.failures+tuple(ImageFailure(i,p,e) for i,p,e in failures))
-    cfg.output.csv_path.parent.mkdir(parents=True,exist_ok=True); CsvPredictionWriter(cfg.output.csv_path).write(result)
-    if failures: raise RuntimeError(f"{len(failures)} unreadable candidate image(s) reported")
+    _, had_failures = categorize_images(cfg, classifier)
+    if had_failures: raise RuntimeError("unreadable candidate image(s) reported")
 if __name__=="__main__": main()

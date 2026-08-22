@@ -71,7 +71,7 @@ def calibrate_temperature(logits, labels):
 
 def select_threshold(logits, labels, candidates, min_precision, calibrate=True):
     temperature=calibrate_temperature(logits,labels) if calibrate else 1.
-    probabilities=torch.softmax(torch.as_tensor(logits)/temperature,1)[:,1]
+    probabilities=logits_to_taken_probability(logits, temperature)
     options=[]
     for threshold in candidates:
         metric=metrics_from_taken_probability(probabilities,labels,float(threshold))
@@ -87,8 +87,8 @@ class PreflightResult:
     splits: dict
     split_counts: dict
 
-def preflight(records,cfg):
-    reader=PillowRasterReader(cfg.data.training.max_decoded_pixels); pixels=[]; hashes={}
+def preflight(records,cfg, reader=None):
+    reader=reader or PillowRasterReader(cfg.data.training.max_decoded_pixels); pixels=[]; hashes={}
     for record in records:
         data=reader.read_rgb_pixels(record.image_path); pixels.append(data); digest=pixel_hash(data)
         if digest in hashes and (hashes[digest].label != record.label or hashes[digest].product_group_id != record.product_group_id):
@@ -99,7 +99,8 @@ def preflight(records,cfg):
     validate_pixel_leakage(records,pixels,splits)
     if any(not s or {r.label.value for r in s}!={"taken","not_taken"} for s in splits.values()):
         raise ManifestError("every split must be non-empty and contain both classes")
-    return PreflightResult(tuple(records),tuple(pixels),{r.image_id:pixel_hash(p) for r,p in zip(records,pixels)},splits,{k:{"total":len(v),"taken":sum(r.label.value=="taken" for r in v),"not_taken":sum(r.label.value=="not_taken" for r in v)} for k,v in splits.items()})
+    return PreflightResult(tuple(records),tuple(pixels),{r.image_id:pixel_hash(p) for r,p in zip(records,pixels)},splits,
+                           {k:{"total":len(v),"taken":sum(r.label.value=="taken" for r in v),"not_taken":sum(r.label.value=="not_taken" for r in v)} for k,v in splits.items()})
 
 def train(model, records, cfg, preflight_result=None):
     seed_everything(cfg.training.seed,cfg.training.deterministic_algorithms); device=resolve_device(cfg)
@@ -117,6 +118,7 @@ def train(model, records, cfg, preflight_result=None):
     best=None; best_score=(-1.,-1.); stale=0
     stages=[(cfg.training.head_warmup_epochs,cfg.training.learning_rate_head,False),(cfg.training.fine_tune_epochs,cfg.training.learning_rate_head,True)]
     for epochs,lr,unfreeze in stages:
+        stale = 0
         if unfreeze:
             for p in model.parameters(): p.requires_grad=True
         if unfreeze:
@@ -162,6 +164,26 @@ def quality_gate(metrics,cfg):
             "taken_recall":{"actual":metrics["taken_recall"],"required":cfg.quality_gate.min_test_taken_recall,"passed":metrics["taken_recall"] >= cfg.quality_gate.min_test_taken_recall},
             "not_taken_false_positive_rate":{"actual":metrics["not_taken_false_positive_rate"],"required":cfg.quality_gate.max_test_not_taken_false_positive_rate,"passed":metrics["not_taken_false_positive_rate"] <= cfg.quality_gate.max_test_not_taken_false_positive_rate}}
     return {"passed":all(x["passed"] for x in checks.values()),"checks":checks,"support":support}
+
+
+def promote_checkpoint(staged_path, production_path):
+    """Atomically promote only a fully written, already-gated checkpoint."""
+    import os
+    from pathlib import Path
+    target = Path(production_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staged_path, target)
+
+
+def promote_if_quality_gate_passed(staged_path, production_path, quality_gate_summary,
+                                   diagnostics_path=None, diagnostics=None):
+    """Persist run diagnostics and promote only after an explicit passing gate."""
+    if diagnostics_path is not None:
+        from .io.artifacts import atomic_json
+        atomic_json(diagnostics_path, diagnostics or {"quality_gate": quality_gate_summary})
+    if not quality_gate_summary.get("passed", False):
+        raise RuntimeError("quality gate failed; production checkpoint was not promoted")
+    promote_checkpoint(staged_path, production_path)
 
 def roc_auc(logits, labels):
     labels=torch.as_tensor(labels).long(); scores=logits_to_taken_probability(logits,1.)

@@ -1,14 +1,12 @@
 import argparse
-import csv, os, time
+import time
 import torch
 from pathlib import Path
 from .config import load_config
 from .io.manifest_csv import CsvManifestReader
 from .model import build_model, save_checkpoint, checkpoint_metadata
-from .training import train, evaluate, select_threshold, quality_gate, roc_auc, preflight
-from .split import pixel_hash
-from .io.raster_pillow import PillowRasterReader
-from .io.artifacts import config_sha256, atomic_json, run_directory
+from .training import train, evaluate, select_threshold, quality_gate, roc_auc, preflight, promote_checkpoint, logits_to_taken_probability
+from .io.artifacts import config_sha256, atomic_json, atomic_csv, run_directory
 def main():
     started=time.monotonic()
     parser=argparse.ArgumentParser(); parser.add_argument("--config",required=True)
@@ -19,9 +17,9 @@ def main():
         "allow_absolute_image_paths":cfg.data.training.allow_absolute_image_paths},
         cfg.data.training.max_decoded_pixels).read()
     if not records: raise ValueError("manifest contains no records")
-    audit=preflight(records,cfg)
+    preflight_result=preflight(records,cfg)
     model=build_model(cfg.model.architecture,cfg.model.pretrained_weights)
-    model,splits=train(model,records,cfg,audit)
+    model,splits=train(model,records,cfg,preflight_result=preflight_result)
     version=cfg.artifacts.run_name; digest=config_sha256(cfg.model_dump(mode="json"))
     run=run_directory(cfg.artifacts.output_directory,version,cfg.artifacts.overwrite_existing_run)
     _, val_logits, val_labels=evaluate(model,splits["validation"],cfg,temperature=1.)
@@ -37,21 +35,18 @@ def main():
     atomic_json(run/"metrics.json",metrics)
     atomic_json(run/"model_card.json",{"intended_use":"binary product image selection","exclusions":["metadata, EXIF, filenames"],"label_policy":{"taken":"product or suitable usage/instructions","not_taken":"advertisements, coupons, banners, campaign art"},"split_counts":metrics["split_counts"],"threshold":threshold,"temperature":temperature,"metrics":test_metrics,"quality_gate":metrics["quality_gate"],"known_limitations":["requires grouped labelled data"],"no_exif_guarantee":True})
     atomic_json(run/"effective_selector_config.json",cfg.model_dump(mode="json"))
-    with (run/"split_assignments.csv.tmp").open("w",newline="",encoding="utf-8") as f:
-        w=csv.DictWriter(f,fieldnames=("image_id","image_path","label","product_group_id","split","pixel_hash")); w.writeheader()
-        for split,rows in splits.items():
-            for r in rows:
-                digest=audit.pixel_hashes[r.image_id]
-                w.writerow({"image_id":r.image_id,"image_path":r.image_path,"label":r.label.value,"product_group_id":r.product_group_id,"split":split,"pixel_hash":digest})
-    os.replace(run/"split_assignments.csv.tmp",run/"split_assignments.csv")
-    with (run/"test_predictions.csv.tmp").open("w",newline="",encoding="utf-8") as f:
-        w=csv.DictWriter(f,fieldnames=("image_id","label","taken_probability","predicted_label")); w.writeheader()
-        for r,logit in zip(splits["test"],test_logits):
-            p=float(torch.softmax(logit.float()/temperature,0)[1]); w.writerow({"image_id":r.image_id,"label":r.label.value,"taken_probability":p,"predicted_label":"taken" if p>=threshold else "not_taken"})
-    os.replace(run/"test_predictions.csv.tmp",run/"test_predictions.csv")
+    atomic_csv(run/"split_assignments.csv", ("image_id","image_path","label","product_group_id","split","pixel_hash"),
+               ({"image_id":r.image_id,"image_path":r.image_path,"label":r.label.value,"product_group_id":r.product_group_id,
+                 "split":split,"pixel_hash":preflight_result.pixel_hashes[r.image_id]}
+                for split, rows in splits.items() for r in rows))
+    atomic_csv(run/"test_predictions.csv", ("image_id","image_path","label","taken_probability","predicted_label"),
+               ({"image_id":r.image_id,"image_path":r.image_path,"label":r.label.value,
+                 "taken_probability":float(logits_to_taken_probability(logit.unsqueeze(0),temperature)[0]),
+                 "predicted_label":"taken" if float(logits_to_taken_probability(logit.unsqueeze(0),temperature)[0])>=threshold else "not_taken"}
+                for r,logit in zip(splits["test"],test_logits)))
     if not passed:
         raise RuntimeError("quality gate failed; production checkpoint was not promoted")
     metadata=checkpoint_metadata(cfg,digest,version); metadata.update({"temperature":temperature,"taken_threshold":threshold,"quality_gate":metrics["quality_gate"]})
     staging=run/"model.checkpoint"; save_checkpoint(staging,model,metadata)
-    Path(cfg.model.checkpoint_path).parent.mkdir(parents=True,exist_ok=True); os.replace(staging,cfg.model.checkpoint_path)
+    promote_checkpoint(staging,cfg.model.checkpoint_path)
 if __name__=="__main__": main()
