@@ -113,6 +113,14 @@ conda run -n dp python -m pytest tests/ -v
 
 Tests cover input resolution, config validation, enumeration, JSON utilities, classifier, models, mask generation, translation module, and FastAPI server — no real OCR/GPU models required for unit tests.
 
+## Product Image Selection
+
+Copy `product-image-selector.config.example.json` and configure the paths. The UTF-8 labels CSV contains `image_path,label,product_group_id,image_id`; labels are `taken` for the product or suitable usage/instructions and `not_taken` for advertisements, coupons, banners, or campaign art. Every related or near-duplicate image must share a group, which is kept within one split to prevent leakage.
+
+Initialize with `.\script\Initialize-Env.ps1`, then run `.\script\Train-ProductImageSelector.ps1 -Config .\selector.json` or `.\script\Categorize-ProductImages.ps1 -Config .\selector.json`. `requires_review` flags predictions near the configured threshold; inspect held-out metrics and quality-gate diagnostics before using a model. Images are never moved or modified, and folder-copy actions and HTTP service are intentionally out of scope.
+
+The selector uses decoded RGB pixels only: no EXIF/XMP/IPTC, filenames, extensions, or metadata are read. Inference attempts every regular file and reports unreadable files rather than filtering by extension.
+
 ## Translation Server (standalone GPU API)
 
 A standalone FastAPI server exposes the local NLLB zh→en translator over HTTP.

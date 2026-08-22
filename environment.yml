@@ -38,6 +38,7 @@ dependencies:
       # PyTorch CUDA 12.6 wheel from official index
       - --extra-index-url https://download.pytorch.org/whl/cu126
       - torch==2.12.1
+      - torchvision==0.27.1
       # Translation engine
       - transformers
       - sentencepiece

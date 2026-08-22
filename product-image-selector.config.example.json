@@ -1,0 +1,9 @@
+{
+  "data": {"training": {"image_root": "training-images", "labels_csv": "labels.csv", "image_path_column": "image_path", "label_column": "label", "product_group_column": "product_group_id", "image_id_column": "image_id", "allow_absolute_image_paths": false, "max_decoded_pixels": 80000000}, "inference": {"image_roots": ["to-categorize"], "recursive": true, "max_decoded_pixels": 80000000, "inference_batch_size": 16, "unreadable_image_policy": "report"}},
+  "model": {"architecture": "efficientnet_v2_s", "pretrained_weights": "DEFAULT", "input_size": 384, "normalization": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "padding_rgb": [0, 0, 0]}, "checkpoint_path": "artifacts/product-image-selector.pt"},
+  "training": {"device": "cuda", "allow_cpu_fallback": false, "seed": 20260822, "deterministic_algorithms": true, "num_workers": 4, "batch_size": 16, "head_warmup_epochs": 3, "fine_tune_epochs": 12, "learning_rate_head": 0.001, "learning_rate_backbone": 0.0001, "weight_decay": 0.0001, "early_stopping_patience": 4, "mixed_precision": true, "augmentation": {"enabled": true, "color_jitter": 0.2, "scale_min": 0.8, "translation_fraction": 0.1, "horizontal_flip_probability": 0.0}, "split": {"train_fraction": 0.7, "validation_fraction": 0.15, "test_fraction": 0.15, "minimum_groups_per_class": 12}},
+  "decision": {"threshold_candidates": [0.5, 0.6, 0.7, 0.8, 0.9], "selection_objective": "maximize_taken_recall_subject_to_min_taken_precision", "min_taken_precision": 0.97, "review_band_half_width": 0.05, "calibrate_temperature": true},
+  "quality_gate": {"min_test_taken_precision": 0.95, "min_test_taken_recall": 0.9, "max_test_not_taken_false_positive_rate": 0.05, "minimum_test_images_per_class": 30, "fail_training_if_not_met": true},
+  "artifacts": {"output_directory": "artifacts", "run_name": "product-image-selector-v1", "overwrite_existing_run": false},
+  "output": {"kind": "csv", "csv_path": "results/categorization.csv"}
+}
