@@ -5,7 +5,10 @@ from pathlib import Path
 from .config import load_config
 from .io.manifest_csv import CsvManifestReader
 from .model import build_model, save_checkpoint, checkpoint_metadata
-from .training import train, evaluate, select_threshold, quality_gate, roc_auc, preflight, promote_checkpoint, logits_to_taken_probability
+from .training import (
+    train, evaluate, select_threshold, quality_gate, roc_auc, preflight,
+    promote_if_quality_gate_passed, logits_to_taken_probability,
+)
 from .io.artifacts import config_sha256, atomic_json, atomic_csv, run_directory
 def main():
     started=time.monotonic()
@@ -30,7 +33,6 @@ def main():
         raise
     test_metrics,test_logits,test_labels=evaluate(model,splits["test"],cfg,threshold,temperature)
     quality=quality_gate(test_metrics,cfg)
-    passed=quality["passed"]
     metrics={"split_counts":{k:len(v) for k,v in splits.items()},"group_counts":{k:len(set(r.product_group_id for r in v)) for k,v in splits.items()},"selected_threshold":threshold,"temperature":temperature,"test":test_metrics,"roc_auc":roc_auc(test_logits,test_labels),"effective_device":str(next(model.parameters()).device),"duration_seconds":time.monotonic()-started,"quality_gate":quality}
     atomic_json(run/"metrics.json",metrics)
     atomic_json(run/"model_card.json",{"intended_use":"binary product image selection","exclusions":["metadata, EXIF, filenames"],"label_policy":{"taken":"product or suitable usage/instructions","not_taken":"advertisements, coupons, banners, campaign art"},"split_counts":metrics["split_counts"],"threshold":threshold,"temperature":temperature,"metrics":test_metrics,"quality_gate":metrics["quality_gate"],"known_limitations":["requires grouped labelled data"],"no_exif_guarantee":True})
@@ -44,9 +46,22 @@ def main():
                  "taken_probability":float(logits_to_taken_probability(logit.unsqueeze(0),temperature)[0]),
                  "predicted_label":"taken" if float(logits_to_taken_probability(logit.unsqueeze(0),temperature)[0])>=threshold else "not_taken"}
                 for r,logit in zip(splits["test"],test_logits)))
-    if not passed:
-        raise RuntimeError("quality gate failed; production checkpoint was not promoted")
     metadata=checkpoint_metadata(cfg,digest,version); metadata.update({"temperature":temperature,"taken_threshold":threshold,"quality_gate":metrics["quality_gate"]})
     staging=run/"model.checkpoint"; save_checkpoint(staging,model,metadata)
-    promote_checkpoint(staging,cfg.model.checkpoint_path)
+    # Single production promotion seam: the shared helper persists run
+    # diagnostics, refuses promotion when the gate failed (production
+    # checkpoint preserved byte-for-byte), and only then atomically
+    # replaces the production checkpoint with the fully written staging
+    # file. No other path may replace the production checkpoint.
+    promote_if_quality_gate_passed(
+        staged_path=staging,
+        production_path=cfg.model.checkpoint_path,
+        quality_gate_summary=quality,
+        diagnostics_path=run/"promotion_diagnostics.json",
+        diagnostics={
+            "metrics": metrics,
+            "quality_gate": quality,
+            "run_directory": str(run),
+        },
+    )
 if __name__=="__main__": main()

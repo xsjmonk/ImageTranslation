@@ -31,6 +31,49 @@ def test_config_and_manifest(tmp_path):
     assert rows[0].label is ProductImageLabel.TAKEN
     (tmp_path/"labels.csv").write_text("image_path,label\nx,bad\n")
     with pytest.raises(ManifestError): CsvManifestReader(tmp_path/"labels.csv",tmp_path/"images").read()
+
+
+def test_selector_config_requires_operational_values_and_rejects_output_overlap(tmp_path):
+    raw = json.loads(Path("product-image-selector.config.example.json").read_text())
+    raw["data"]["training"]["image_root"] = "images"
+    raw["data"]["training"]["labels_csv"] = "labels.csv"
+    raw["data"]["inference"]["image_roots"] = ["images"]
+    raw["model"]["checkpoint_path"] = "model.pt"
+    raw["artifacts"]["output_directory"] = "images/artifacts"
+    raw["output"]["csv_path"] = "out.csv"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(raw))
+
+    with pytest.raises(Exception, match="inside an input image root"):
+        load_config(config_path)
+
+    del raw["training"]["batch_size"]
+    raw["artifacts"]["output_directory"] = "artifacts"
+    config_path.write_text(json.dumps(raw))
+    with pytest.raises(Exception, match="batch_size"):
+        load_config(config_path)
+
+
+def test_real_efficientnet_factory_cpu_weights_none():
+    try:
+        import torchvision
+    except Exception as error:
+        pytest.fail(
+            "torchvision is required for the offline selector smoke test; "
+            "run script\\Initialize-Env.ps1. "
+            f"Import error: {error}"
+        )
+
+    import torch
+    from image_translation.product_image_selection.model import build_model
+
+    model = build_model("efficientnet_v2_s", None).cpu().eval()
+    with torch.inference_mode():
+        output = model(torch.zeros(1, 3, 384, 384))
+    assert tuple(output.shape) == (1, 2)
+    assert torchvision.__version__
+
+
 def test_pixel_only_format_agnostic_and_discovery(tmp_path):
     root=tmp_path/"images"; root.mkdir(); pixels=np.zeros((3,5,3),dtype=np.uint8); pixels[...,0]=200
     with (root/"not-an-extension.data").open("wb") as f: Image.fromarray(pixels).save(f,format="PNG")
@@ -295,3 +338,159 @@ def test_selector_boundary_and_powerShell_scripts_parse():
         completed = subprocess.run(["pwsh", "-NoProfile", "-Command", command],
                                    cwd=root, capture_output=True, text=True)
         assert completed.returncode == 0, completed.stderr
+
+
+# ---------------------------------------------------------------------------
+# Defect 1: mixed-label groups are indivisible support units
+# ---------------------------------------------------------------------------
+
+def test_three_mixed_groups_satisfy_one_group_per_class_per_split():
+    records = []
+    for group in ("g1", "g2", "g3"):
+        records.extend([
+            LabeledImageRecord(group + "-taken", ProductImageLabel.TAKEN, group, group + "-t"),
+            LabeledImageRecord(group + "-not", ProductImageLabel.NOT_TAKEN, group, group + "-n"),
+        ])
+    splits = grouped_split(
+        records, seed=123, fractions=(1/3, 1/3, 1/3),
+        minimum_groups_per_class=1,
+    )
+    assert all(len(rows) == 2 for rows in splits.values())
+    assert all({row.label for row in rows} == {
+        ProductImageLabel.TAKEN, ProductImageLabel.NOT_TAKEN,
+    } for rows in splits.values())
+    assert len({row.product_group_id for rows in splits.values() for row in rows}) == 3
+
+
+def test_mixed_and_pure_groups_with_imbalanced_targets():
+    records = _records({
+        "mixed": (ProductImageLabel.TAKEN, ProductImageLabel.NOT_TAKEN),
+        "big-taken": tuple([ProductImageLabel.TAKEN] * 8),
+        "big-not": tuple([ProductImageLabel.NOT_TAKEN] * 8),
+        "mid-taken": tuple([ProductImageLabel.TAKEN] * 4),
+        "mid-not": tuple([ProductImageLabel.NOT_TAKEN] * 4),
+    })
+    splits = grouped_split(records, seed=5, minimum_groups_per_class=1)
+    owners = {}
+    for split, rows in splits.items():
+        for row in rows:
+            assert row.product_group_id not in owners or owners[row.product_group_id] == split
+            owners[row.product_group_id] = split
+    assert set(owners) == {r.product_group_id for r in records}
+    assert all({row.label.value for row in rows} == {"taken", "not_taken"} for rows in splits.values())
+    assert splits.diagnostics["actual_totals"] == {s: len(rows) for s, rows in splits.items()}
+
+
+def test_mixed_group_assignment_is_deterministic_and_disjoint():
+    records = _records({f"g{i}": (ProductImageLabel.TAKEN, ProductImageLabel.NOT_TAKEN)
+                        for i in range(3)})
+    a = grouped_split(records, seed=42, minimum_groups_per_class=1)
+    b = grouped_split(records, seed=42, minimum_groups_per_class=1)
+    assert a.diagnostics["group_assignments"] == b.diagnostics["group_assignments"]
+    for name, rows in a.items():
+        for row in rows:
+            assert a.diagnostics["group_assignments"][row.product_group_id] == name
+
+
+# ---------------------------------------------------------------------------
+# Defect 2: production CLI uses the shared promotion helper
+# ---------------------------------------------------------------------------
+
+def test_train_cli_calls_shared_promotion_helper(monkeypatch, tmp_path):
+    import torch
+    from types import SimpleNamespace
+
+    import image_translation.product_image_selection.train_cli as cli
+    from image_translation.product_image_selection.domain import LabeledImageRecord, ProductImageLabel
+
+    calls = []
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+
+    row = LabeledImageRecord("i1", ProductImageLabel.TAKEN, "g1", "i1")
+    splits = {"train": [row], "validation": [row], "test": [row]}
+    model = SimpleNamespace(parameters=lambda: iter([torch.zeros(1)]))
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(
+            architecture="tiny",
+            pretrained_weights=None,
+            checkpoint_path=str(tmp_path / "production.pt"),
+                              model_dump=lambda **k: {}),
+        data=SimpleNamespace(
+            training=SimpleNamespace(labels_csv="l.csv", image_root="images",
+                                     image_path_column="p", label_column="l",
+                                     product_group_column="g", image_id_column="i",
+                                     allow_absolute_image_paths=True,
+                                     max_decoded_pixels=10),
+            inference=SimpleNamespace(image_roots=("images",))),
+        artifacts=SimpleNamespace(run_name="r", output_directory=str(tmp_path),
+                                  overwrite_existing_run=True),
+        decision=SimpleNamespace(threshold_candidates=(0.5,),
+                                 min_taken_precision=0.0,
+                                 calibrate_temperature=False),
+        model_dump=lambda **k: {},
+    )
+
+    class FakeManifest:
+        def __init__(self, *a, **k):
+            pass
+
+        def read(self):
+            return [row]
+
+    monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+    monkeypatch.setattr(cli, "CsvManifestReader", FakeManifest)
+    monkeypatch.setattr(cli, "preflight",
+                        lambda records, cfg: SimpleNamespace(pixel_hashes={"i1": "h"}))
+    monkeypatch.setattr(cli, "build_model", lambda *a, **k: model)
+    monkeypatch.setattr(cli, "train", lambda *a, **k: (model, splits))
+    monkeypatch.setattr(cli, "evaluate",
+                        lambda *a, **k: ({}, torch.tensor([[0.0, 0.0]]), torch.tensor([0])))
+    monkeypatch.setattr(cli, "select_threshold",
+                        lambda *a, **k: (0.5, 1.0))
+    monkeypatch.setattr(cli, "roc_auc", lambda *a, **k: 0.9)
+    monkeypatch.setattr(cli, "checkpoint_metadata", lambda *a, **k: {})
+    monkeypatch.setattr(cli, "save_checkpoint", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "config_sha256", lambda *a, **k: "digest")
+    monkeypatch.setattr(cli, "run_directory", lambda *a, **k: tmp_path / "run")
+    monkeypatch.setattr(cli, "promote_if_quality_gate_passed", spy)
+    monkeypatch.setattr("sys.argv", ["train_cli", "--config", str(tmp_path / "c.json")])
+
+    # Pass outcome
+    monkeypatch.setattr(cli, "quality_gate",
+                        lambda *a, **k: {"passed": True, "checks": {}})
+    cli.main()
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["staged_path"] == tmp_path / "run" / "model.checkpoint"
+    assert call["production_path"] == cfg.model.checkpoint_path
+    assert call["quality_gate_summary"]["passed"] is True
+    assert call["diagnostics_path"] == tmp_path / "run" / "promotion_diagnostics.json"
+    assert call["diagnostics"]["quality_gate"]["passed"] is True
+    assert call["diagnostics"]["metrics"]["selected_threshold"] == 0.5
+    assert call["diagnostics"]["run_directory"] == str(tmp_path / "run")
+
+    # Fail outcome: the helper is still the single seam that decides
+    calls.clear()
+    monkeypatch.setattr(cli, "quality_gate",
+                        lambda *a, **k: {"passed": False, "checks": {"x": {"passed": False}}})
+    cli.main()
+    assert len(calls) == 1
+    assert calls[0]["quality_gate_summary"]["passed"] is False
+
+
+def test_passed_quality_gate_atomically_replaces_checkpoint(tmp_path):
+    production = tmp_path / "production.pt"
+    staged = tmp_path / "staged.pt"
+    diagnostics = tmp_path / "run" / "promotion_diagnostics.json"
+    production.write_bytes(b"old production")
+    staged.write_bytes(b"new production candidate")
+    summary = {"passed": True, "checks": {"taken_precision": {"passed": True}}}
+    promote_if_quality_gate_passed(
+        staged, production, summary, diagnostics,
+        {"metrics": {"taken_precision": .9}, "quality_gate": summary,
+         "run_directory": str(tmp_path)})
+    assert production.read_bytes() == b"new production candidate"
+    assert not staged.exists()  # os.replace moves the fully written staging file
+    assert json.loads(diagnostics.read_text())["quality_gate"]["passed"] is True

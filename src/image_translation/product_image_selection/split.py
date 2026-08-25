@@ -54,34 +54,82 @@ def grouped_split(records, seed=0, fractions=(.7, .15, .15), minimum_groups_per_
     totals = [0, 0, 0]
     classes = [defaultdict(int) for _ in range(3)]
 
-    def can_still_support(candidate, index, remaining):
-        trial = [dict(x) for x in classes]
-        trial[index]["taken"] = trial[index].get("taken", 0) + candidate.taken_count
-        trial[index]["not_taken"] = trial[index].get("not_taken", 0) + candidate.not_taken_count
-        for target in range(3):
+    def distinct_support_groups(label, split_index):
+        """Number of distinct assigned groups contributing ``label`` to a split."""
+        split_name = split_names[split_index]
+        return sum(1 for g, i in assignment.items() if i == split_name
+                   and getattr(units[g], f"{label}_count") > 0)
+
+    def feasibility_ok(candidate, index, remaining):
+        """True if every split/label can still reach required_groups after
+        tentatively assigning ``candidate`` to split ``index``.
+
+        ``remaining`` is the set of unassigned groups EXCLUDING the
+        candidate. Mixed units are indivisible: one unit contributes its
+        whole label set to the split it lands on and is never reused.
+        """
+        for s in range(3):
             for label in ("taken", "not_taken"):
-                have = sum(1 for group, split in assignment.items() if split == split_names[target]
-                           and getattr(units[group], f"{label}_count") > 0)
-                if target == index and getattr(candidate, f"{label}_count") > 0:
+                have = distinct_support_groups(label, s)
+                if s == index and getattr(candidate, f"{label}_count") > 0:
                     have += 1
-                available = sum(getattr(units[g], f"{label}_count") > 0 for g in remaining)
+                if have >= required_groups:
+                    continue
+                available = sum(1 for g in remaining
+                                if getattr(units[g], f"{label}_count") > 0)
                 if have + available < required_groups:
                     return False
         return True
 
-    # Establish support with indivisible units first. This is one assignment
-    # pass: a mixed-label unit satisfies both counters without being reused.
+    # Establish class support with indivisible GroupUnits only. One
+    # assignment pass per split: while a split is missing required class
+    # support, assign one UNASSIGNED unit. A mixed-label unit satisfies
+    # both support counters once and is never assigned to a second split.
+    remaining_units = set(groups)
     for index in range(3):
-        for label in ("taken", "not_taken"):
-            candidates = [g for g in groups if g not in assignment
-                          and getattr(units[g], f"{label}_count") > 0]
+        while (distinct_support_groups("taken", index) < required_groups
+               or distinct_support_groups("not_taken", index) < required_groups):
+            missing = {
+                label for label in ("taken", "not_taken")
+                if distinct_support_groups(label, index) < required_groups
+            }
+            candidates = [
+                g for g in groups
+                if g in remaining_units
+                and any(getattr(units[g], f"{label}_count") > 0
+                        for label in missing)
+            ]
             if not candidates:
-                raise ManifestError("grouped stratification cannot satisfy class support")
-            group = min(candidates, key=lambda g: (
-                -int(units[g].taken_count > 0 and units[g].not_taken_count > 0),
-                hashlib.sha256(f"{seed}:{g}:{index}:{label}".encode()).hexdigest()))
+                raise ManifestError(
+                    "grouped stratification cannot satisfy class support")
+
+            def candidate_key(g, _index=index, _missing=missing):
+                unit = units[g]
+                contributed = sum(
+                    1 for label in _missing
+                    if getattr(unit, f"{label}_count") > 0
+                )
+                feasible = feasibility_ok(unit, _index, remaining_units - {g})
+                return (-contributed, 0 if feasible else 1,
+                        hashlib.sha256(
+                            f"{seed}:{g}:{_index}".encode()).hexdigest(), g)
+
+            group = min(candidates, key=candidate_key)
             unit = units[group]
+            if not feasibility_ok(unit, index, remaining_units - {group}):
+                # Ranking prefers contribution; never accept an assignment
+                # that leaves later split/class support unsatisfiable.
+                feasible = [
+                    g for g in candidates
+                    if feasibility_ok(units[g], index, remaining_units - {g})
+                ]
+                if not feasible:
+                    raise ManifestError(
+                        "grouped stratification cannot satisfy class support")
+                group = min(feasible, key=candidate_key)
+                unit = units[group]
             assignment[group] = split_names[index]
+            remaining_units.discard(group)
             totals[index] += unit.total_count
             classes[index]["taken"] += unit.taken_count
             classes[index]["not_taken"] += unit.not_taken_count
