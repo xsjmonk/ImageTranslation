@@ -63,93 +63,7 @@ if (-not (Test-Path $ConfigPath)) {
 }
 Write-Host "[INFO] Config:      $ConfigPath"
 
-# ---- Read config for status display ----
-$ServerHost = '127.0.0.1'
-$ServerPort = 8091
-$ServerWorkers = 1
-$ServerLogLevel = 'info'
-$ModelName = 'facebook/nllb-200-distilled-600M'
-$ModelFamily = 'nllb'
-$SourceLanguage = 'zho_Hans'
-$TargetLanguage = 'eng_Latn'
-$ModelCacheDir = './models'
-$ModelDevice = 'cuda'
-$Precision = 'auto'
-$WarmupOnStart = $true
-try {
-    $ConfigJson = Get-Content -Raw -Path $ConfigPath | ConvertFrom-Json
-    if ($ConfigJson.server.host)        { $ServerHost = [string]$ConfigJson.server.host }
-    if ($ConfigJson.server.port)        { $ServerPort = [int]$ConfigJson.server.port }
-    if ($ConfigJson.server.workers)     { $ServerWorkers = [int]$ConfigJson.server.workers }
-    if ($ConfigJson.server.log_level)   { $ServerLogLevel = [string]$ConfigJson.server.log_level }
-    if ($ConfigJson.translation.model_name) { $ModelName = [string]$ConfigJson.translation.model_name }
-    if ($ConfigJson.translation.model_family) { $ModelFamily = [string]$ConfigJson.translation.model_family }
-    if ($ConfigJson.translation.source_language) { $SourceLanguage = [string]$ConfigJson.translation.source_language }
-    if ($ConfigJson.translation.target_language) { $TargetLanguage = [string]$ConfigJson.translation.target_language }
-    if ($ConfigJson.server.model_cache_dir) { $ModelCacheDir = [string]$ConfigJson.server.model_cache_dir }
-    else { $ModelCacheDir = 'D:\Caches\' }
-    if ($ConfigJson.translation.device)     { $ModelDevice = [string]$ConfigJson.translation.device }
-    if ($ConfigJson.translation.precision)  { $Precision = [string]$ConfigJson.translation.precision }
-    if ($null -ne $ConfigJson.runtime.warmup_on_start) { $WarmupOnStart = [bool]$ConfigJson.runtime.warmup_on_start }
-}
-catch {
-    Write-Host "[WARN] Could not parse config for display (will show defaults): $($_.Exception.Message)" -ForegroundColor Yellow
-}
-
-$ServerUrl = "http://${ServerHost}:${ServerPort}"
-
-# When bound to all interfaces (0.0.0.0 / ::), list the machine's LAN
-# addresses so remote clients know which URL to use.
-$LanUrls = @()
-if ($ServerHost -in @('0.0.0.0', '::')) {
-    $LanUrls = @(
-        Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.IPAddress -notlike '127.*' -and
-                $_.IPAddress -notlike '169.254.*' -and
-                $_.PrefixOrigin -ne 'WellKnown'
-            } |
-            ForEach-Object { "http://$($_.IPAddress):$ServerPort" }
-    ) | Sort-Object -Unique
-}
-
-Write-Host ""
-Write-Host "[STATUS] Host:        $ServerHost"
-Write-Host "[STATUS] Port:        $ServerPort"
-Write-Host "[STATUS] Local URL:   $ServerUrl"
-if ($LanUrls.Count -gt 0) {
-    foreach ($u in $LanUrls) {
-        Write-Host "[STATUS] Remote URL:  $u"
-    }
-    Write-Host "[INFO]  Remote access: allow inbound TCP port $ServerPort in Windows Firewall"
-    Write-Host "       (run as Administrator: New-NetFirewallRule -DisplayName 'TranslationServer' -Direction Inbound -Protocol TCP -LocalPort $ServerPort -Action Allow)"
-}
-Write-Host "[STATUS] Workers:     $ServerWorkers"
-Write-Host "[STATUS] Log level:   $ServerLogLevel"
-Write-Host "[STATUS] Model:       $ModelName"
-Write-Host "[STATUS] Family:      $ModelFamily"
-Write-Host "[STATUS] Languages:   $SourceLanguage -> $TargetLanguage"
-Write-Host "[STATUS] Cache:       $ModelCacheDir"
-Write-Host "[STATUS] Device:      $ModelDevice"
-Write-Host "[STATUS] Precision:   $Precision"
-Write-Host "[STATUS] Warmup:      $(if ($WarmupOnStart) { 'on start' } else { 'lazy (first request)' })"
-Write-Host ""
-
-# ---- Pre-flight: is the port already in use? ----
-$listener = Get-NetTCPConnection -LocalPort $ServerPort -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if ($listener) {
-    $ownerName = ''
-    $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-    if ($owner) { $ownerName = " ($($owner.ProcessName))" }
-    Write-Host ""
-    Write-Host "[ERROR] Port $ServerPort is already in use by process $($listener.OwningProcess)$ownerName."
-    Write-Host "[ERROR] A translation server may already be running on $ServerUrl."
-    Write-Host "[ERROR] Stop it first, or use a different port in the config, then retry."
-    exit 3
-}
-
-# ---- Locate the 'dp' environment Python ----
+# ---- Locate the 'dp' environment Python (needed before config inspection) ----
 # `conda` on PATH may be a real executable or a profile alias/function
 # (whose .Source is not a file path). Only accept a real application; the
 # known install locations are probed first.
@@ -181,36 +95,121 @@ if (-not $CondaExe -or -not (Test-Path $CondaExe)) {
     exit 1
 }
 
-# Prefer the environment's python directly (no conda-run output buffering);
-# fall back to `conda run --no-capture-output` if it is missing.
 $CondaExePath = [System.IO.Path]::GetFullPath($CondaExe)
 $CondaParent = Split-Path -Parent $CondaExePath
 if ((Split-Path -Leaf $CondaParent) -eq 'bin' -and
     (Split-Path -Leaf (Split-Path -Parent $CondaParent)) -eq 'Library') {
-    # conda.bat discovered through the Miniconda Library\bin shim
     $CondaRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $CondaExePath))
 }
 else {
-    # Standard Scripts\conda.exe installation
     $CondaRoot = Split-Path -Parent $CondaParent
 }
 $EnvPython = Join-Path $CondaRoot "envs\dp\python.exe"
 if (Test-Path $EnvPython) {
     $LaunchCmd = $EnvPython
     $LaunchArgs = @('-m', 'translation_server', '-c', $ConfigPath)
+    $SummaryCmd = $EnvPython
+    $SummaryArgs = @('-m', 'translation_server', '--print-config-summary', '-c', $ConfigPath)
 }
 else {
     Write-Host "[WARN] $EnvPython not found; using 'conda run --no-capture-output'." -ForegroundColor Yellow
     $LaunchCmd = $CondaExe
     $LaunchArgs = @('run', '--no-capture-output', '-n', 'dp', '--cwd', $RepoRoot,
                     'python', '-m', 'translation_server', '-c', $ConfigPath)
+    $SummaryCmd = $CondaExe
+    $SummaryArgs = @('run', '--no-capture-output', '-n', 'dp', '--cwd', $RepoRoot,
+                     'python', '-m', 'translation_server', '--print-config-summary', '-c', $ConfigPath)
 }
 Write-Host "[INFO] Python:      $LaunchCmd"
+
+# ---- Load normalized config summary via the same Python loader as the server ----
+$env:PYTHONPATH = Join-Path $RepoRoot 'src'
+$summaryJson = & $SummaryCmd @SummaryArgs 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Could not load config summary from $ConfigPath`: $summaryJson"
+    exit 1
+}
+try {
+    $ConfigSummary = $summaryJson | ConvertFrom-Json
+}
+catch {
+    Write-Error "Config summary was not valid JSON: $summaryJson"
+    exit 1
+}
+
+$ServerHost = [string]$ConfigSummary.host
+$ServerPort = [int]$ConfigSummary.port
+$ServerWorkers = [int]$ConfigSummary.workers
+$ServerLogLevel = [string]$ConfigSummary.log_level
+$ActiveModel = [string]$ConfigSummary.active_model
+$ModelBackend = [string]$ConfigSummary.backend
+$ModelName = [string]$ConfigSummary.model
+$ModelFamily = [string]$ConfigSummary.model_family
+$SourceLanguage = [string]$ConfigSummary.source_language
+$TargetLanguage = [string]$ConfigSummary.target_language
+$ModelCacheDir = [string]$ConfigSummary.cache_dir
+$ModelDevice = [string]$ConfigSummary.device
+$Precision = [string]$ConfigSummary.precision
+$WarmupOnStart = [bool]$ConfigSummary.warmup_on_start
+
+$ServerUrl = "http://${ServerHost}:${ServerPort}"
+
+# When bound to all interfaces (0.0.0.0 / ::), list the machine's LAN
+# addresses so remote clients know which URL to use.
+$LanUrls = @()
+if ($ServerHost -in @('0.0.0.0', '::')) {
+    $LanUrls = @(
+        Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.IPAddress -notlike '127.*' -and
+                $_.IPAddress -notlike '169.254.*' -and
+                $_.PrefixOrigin -ne 'WellKnown'
+            } |
+            ForEach-Object { "http://$($_.IPAddress):$ServerPort" }
+    ) | Sort-Object -Unique
+}
+
+Write-Host ""
+Write-Host "[STATUS] Host:        $ServerHost"
+Write-Host "[STATUS] Port:        $ServerPort"
+Write-Host "[STATUS] Local URL:   $ServerUrl"
+if ($LanUrls.Count -gt 0) {
+    foreach ($u in $LanUrls) {
+        Write-Host "[STATUS] Remote URL:  $u"
+    }
+    Write-Host "[INFO]  Remote access: allow inbound TCP port $ServerPort in Windows Firewall"
+    Write-Host "       (run as Administrator: New-NetFirewallRule -DisplayName 'TranslationServer' -Direction Inbound -Protocol TCP -LocalPort $ServerPort -Action Allow)"
+}
+Write-Host "[STATUS] Workers:     $ServerWorkers"
+Write-Host "[STATUS] Log level:   $ServerLogLevel"
+Write-Host "[STATUS] Profile:     $ActiveModel"
+Write-Host "[STATUS] Backend:     $ModelBackend"
+Write-Host "[STATUS] Model:       $ModelName"
+Write-Host "[STATUS] Family:      $ModelFamily"
+Write-Host "[STATUS] Languages:   $SourceLanguage -> $TargetLanguage"
+Write-Host "[STATUS] Cache:       $ModelCacheDir"
+Write-Host "[STATUS] Device:      $ModelDevice"
+Write-Host "[STATUS] Precision:   $Precision"
+Write-Host "[STATUS] Warmup:      $(if ($WarmupOnStart) { 'on start' } else { 'lazy (first request)' })"
+Write-Host ""
+
+# ---- Pre-flight: is the port already in use? ----
+$listener = Get-NetTCPConnection -LocalPort $ServerPort -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($listener) {
+    $ownerName = ''
+    $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+    if ($owner) { $ownerName = " ($($owner.ProcessName))" }
+    Write-Host ""
+    Write-Host "[ERROR] Port $ServerPort is already in use by process $($listener.OwningProcess)$ownerName."
+    Write-Host "[ERROR] A translation server may already be running on $ServerUrl."
+    Write-Host "[ERROR] Stop it first, or use a different port in the config, then retry."
+    exit 3
+}
 
 # ---- Launch server as a watched child process ----
 $OutLog = Join-Path $env:TEMP 'translation-server.out.log'
 $ErrLog = Join-Path $env:TEMP 'translation-server.err.log'
-$env:PYTHONPATH = Join-Path $RepoRoot 'src'
 
 Write-Host ""
 if ($LanUrls.Count -gt 0) {

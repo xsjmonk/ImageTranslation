@@ -26,17 +26,28 @@ def main(argv: list[str] | None = None) -> int:
              "completeness + offline policy) without loading the model, "
              "print the resolved snapshot, and exit 0/1.",
     )
+    parser.add_argument(
+        "--print-config-summary",
+        action="store_true",
+        help="Load config and print normalized operational summary as JSON, then exit.",
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config) if args.config else None
 
     # Load config + build runtime (validates config before importing heavy deps)
-    from .config import load_server_config
+    from .config import build_config_summary, load_server_config
     try:
         server_config = load_server_config(config_path)
     except (FileNotFoundError, ValueError) as e:
         print(f"[ERROR] Config error: {e}", file=sys.stderr)
         return 1
+
+    if args.print_config_summary:
+        import json
+
+        print(json.dumps(build_config_summary(server_config), indent=2))
+        return 0
 
     # Setup logging
     log_level = getattr(logging, server_config.server.log_level.upper(), logging.INFO)

@@ -123,7 +123,69 @@ The selector uses decoded RGB pixels only: no EXIF/XMP/IPTC, filenames, extensio
 
 ## Translation Server (standalone GPU API)
 
-A standalone FastAPI server exposes the local NLLB zh→en translator over HTTP.
+### Translation backends
+
+The server supports two additive translation backends. The active repository
+configuration uses `translation.active_model` plus a shared
+`translation.models` registry. Profile keys are user-facing model names
+(`nllb`, `hymt2`); the normalized backend identifier for the NLLB seq2seq
+implementation remains `current` internally. Configuration files are parsed
+with [JSON5](https://json5.org/) via the `json5` package, so `// line` and
+`/* block */` comments are allowed without corrupting string literals that
+contain `//` or `/* ... */`.
+
+```jsonc
+"translation": {
+  // Default profile — NLLB seq2seq (backend identifier: "current")
+  "active_model": "nllb",
+  "models": {
+    "nllb": {
+      "backend": "current",
+      "model_name": "facebook/nllb-200-distilled-600M",
+      "model_family": "nllb",
+      "model_revision": "main"
+    },
+    "hymt2": {
+      "backend": "hymt2",
+      "model_name": "tencent/Hy-MT2-1.8B-FP8",
+      "model_family": "hymt2",
+      "model_revision": "main"
+    }
+  }
+}
+```
+
+- `nllb` — the existing NLLB/Helsinki seq2seq backend (default profile).
+- `hymt2` — Tencent Hy-MT2 causal LM backend (opt-in).
+
+Shared translation policy (languages, device, generation, offline/download)
+lives in the `translation` section once. Model profiles own only model
+identity fields (`backend`, `model_name`, `model_family`, `model_revision`).
+The server-owned cache root remains `server.model_cache_dir`; model profiles
+must not override it.
+
+To switch to Hy-MT2, set `"active_model": "hymt2"` in
+`translation-server.config.json` and restart the server. Hy-MT2 uses the same
+server-owned `model_cache_dir`, HTML pipeline, API contract, and offline/cache
+policy as the NLLB profile.
+
+**Rollback:** set `"active_model": "nllb"` and restart the server.
+
+`Start-TranslationServer.ps1` reads the same normalized configuration through
+`python -m translation_server --print-config-summary`, so commented JSONC and
+profile-based model selection appear correctly in the startup status panel.
+
+A flat legacy schema (`translation.backend`, `translation.model_name`, …) is
+still accepted for compatibility; see
+`translation-server.config.legacy-flat.example.json` (marked not active).
+
+Optional gated GPU smoke test (may download weights):
+
+```powershell
+.\script\Smoke-HyMt2Translation.ps1
+```
+
+A standalone FastAPI server exposes the local zh→en translator over HTTP.
 
 ### Start the server
 

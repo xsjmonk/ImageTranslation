@@ -1,42 +1,27 @@
 {
+  // Process/network settings. server.workers is fixed to 1 internally for GPU safety.
   "server": {
     "host": "0.0.0.0",
     "port": 8091,
-    "workers": 1,
     "log_level": "info",
     "model_cache_dir": "D:/Caches/translation"
   },
+
   "runtime": {
     "warmup_on_start": true
   },
-  "quality": {
-    "unknown_token_policy": "warn"
-  },
-  "structured": {
-    "enabled": true,
-    "max_chapter_characters": 100000,
-    "max_segment_tokens": 450,
-    "max_target_tokens": 400,
-    "context_window_tokens": 0,
-    "preserve_patterns": [],
-    "translatable_attributes": [],
-    "excluded_tags": ["script", "style", "code", "pre"],
-    "excluded_classes": ["notranslate"],
-    "segment_warning_seconds": 60.0,
-    "max_total_seconds": 600.0,
-    "max_retries_per_segment": 1,
-    "batch_size": 4,
-    "concurrency": 1
-  },
+
   "translation": {
-    "default_style": "sentence",
-    "model_name": "facebook/nllb-200-distilled-600M",
-    "model_family": "nllb",
-    "model_revision": "main",
-    "allow_model_download": true,
-    "local_files_only": false,
+    // Switch engines: uncomment exactly one active_model line and restart.
+    // Active — NLLB seq2seq (default; normalized backend identifier is "current"):
+    "active_model": "nllb",
+    // Opt-in — Hy-MT2 causal LM:
+    // "active_model": "hymt2",
+
+    // Shared by every translation model profile.
     "source_language": "zho_Hans",
     "target_language": "eng_Latn",
+    "default_style": "sentence",
     "device": "cuda",
     "cuda_device": 0,
     "allow_cpu_fallback": false,
@@ -44,7 +29,10 @@
     "batch_size": 8,
     "max_input_characters": 4000,
     "max_input_tokens": 1024,
+    "allow_model_download": true,
+    "local_files_only": false,
     "commercial_use": false,
+
     "generation": {
       "max_new_tokens": 512,
       "min_new_tokens": 1,
@@ -61,6 +49,7 @@
       "retry_on_degenerate_output": true,
       "retry_num_beams": 1,
       "retry_max_new_tokens": 64,
+      "temperature": 1.0,
       "styles": {
         "sentence": {
           "target_token_multiplier": 2.5,
@@ -75,6 +64,43 @@
           "scaffolding_policy": "warn"
         }
       }
+    },
+
+    // Model-specific identity only. Do not repeat shared settings here.
+    "models": {
+      "nllb": {
+        "backend": "current",
+        "model_name": "facebook/nllb-200-distilled-600M",
+        "model_family": "nllb",
+        "model_revision": "main"
+      },
+      "hymt2": {
+        "backend": "hymt2",
+        "model_name": "tencent/Hy-MT2-1.8B-FP8",
+        "model_family": "hymt2",
+        "model_revision": "main"
+      }
     }
+  },
+
+  "structured": {
+    "enabled": true,
+    "max_chapter_characters": 100000,
+    "max_segment_tokens": 450,
+    "max_target_tokens": 400,
+    "context_window_tokens": 0,
+    "preserve_patterns": [],
+    "translatable_attributes": [],
+    "excluded_tags": ["script", "style", "code", "pre"],
+    "excluded_classes": ["notranslate"],
+    "segment_warning_seconds": 60.0,
+    "max_total_seconds": 600.0,
+    "max_retries_per_segment": 1,
+    "batch_size": 4,
+    "concurrency": 1
+  },
+
+  "quality": {
+    "unknown_token_policy": "warn"
   }
 }

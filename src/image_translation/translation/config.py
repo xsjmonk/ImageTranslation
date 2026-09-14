@@ -66,6 +66,7 @@ class GenerationConfig:
     retry_on_degenerate_output: bool = True
     retry_num_beams: int = 1
     retry_max_new_tokens: int = 64
+    temperature: float = 1.0
     phrase_target_token_multiplier: float = 1.5
     phrase_short_text_max_new_tokens: int = 32
     phrase_length_penalty: float = 0.8
@@ -104,6 +105,12 @@ class GenerationConfig:
         if self.phrase_scaffolding_policy not in {"off", "warn", "retry", "reject"}:
             raise ValueError(
                 "generation.phrase_scaffolding_policy must be off, warn, retry, or reject"
+            )
+        if self.temperature <= 0:
+            raise ValueError("generation.temperature must be > 0")
+        if self.do_sample and self.temperature <= 0:
+            raise ValueError(
+                "generation.temperature must be > 0 when do_sample is enabled"
             )
 
     def resolve_style(
@@ -188,6 +195,7 @@ class TranslationConfig:
       error. Contradictory with allow_model_download=true (rejected at
       validation time).
     """
+    backend: str = "current"
     model_name: str = "facebook/nllb-200-distilled-600M"
     model_family: str = "nllb"
     model_revision: str = "main"
@@ -229,11 +237,23 @@ class TranslationConfig:
             raise ValueError("batch_size must be >= 1")
         if self.max_input_tokens < 1:
             raise ValueError("max_input_tokens must be >= 1")
-        if self.model_family not in {"nllb", "helsinki"}:
+        if self.backend not in {"current", "hymt2"}:
             raise ValueError(
-                "model_family must be 'nllb' or 'helsinki'"
+                "translation.backend must be 'current' or 'hymt2'"
             )
-        if self.commercial_use and self.model_family == "nllb":
+        if self.backend == "current" and self.model_family not in {"nllb", "helsinki"}:
+            raise ValueError(
+                "model_family must be 'nllb' or 'helsinki' when backend is 'current'"
+            )
+        if self.backend == "hymt2":
+            if self.model_family != "hymt2":
+                self.model_family = "hymt2"
+            lowered = self.model_name.lower()
+            if "nllb" in lowered or "opus-mt" in lowered:
+                raise ValueError(
+                    "backend 'hymt2' requires a Hy-MT2 model_name, not a seq2seq model"
+                )
+        if self.commercial_use and self.model_family == "nllb" and self.backend == "current":
             raise ValueError(
                 "NLLB is CC-BY-NC-4.0 and cannot be used for commercial_use; "
                 "configure model_family='helsinki' explicitly"

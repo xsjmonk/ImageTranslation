@@ -74,6 +74,7 @@ class Seq2SeqTranslator(Translator):
             pass
 
         return TranslationRuntimeInfo(
+            backend="current",
             model_name=self._config.model_name,
             model_family=self._config.model_family,
             model_revision=self._config.model_revision,
@@ -244,133 +245,31 @@ class Seq2SeqTranslator(Translator):
             )
         return f"cuda:{index}"
 
-    def _resolve_model_snapshot(self) -> tuple:
-        """Authoritative model resolution used by tokenizer AND model loading.
-
-        Returns (snapshot_path, cache_status) with cache_status one of
-        "cache_hit" | "download".
-
-        - Resolves the configured cache root to an absolute path (the
-          configured location is authoritative; the implementation never
-          silently falls back to the HF default cache when set).
-        - First tries Hugging Face local-only snapshot resolution; success
-          = cache hit (reused, no network).
-        - On a miss: if downloads are allowed, downloads into the
-          configured root; if offline (local_files_only or downloads
-          disabled), fails with an actionable cache-missing error and no
-          network access.
-        - Verifies the resolved snapshot contains the files the configured model requires
-          before it can be reported ready.
-
-        Raises:
-            TranslationModelLoadError: offline cache miss, download
-                failure, unusable cache path, or incomplete snapshot.
-        """
-        import os
-        from pathlib import Path
-
-        from huggingface_hub import snapshot_download
+    def _resolve_model_snapshot(self) -> ResolvedModel:
+        """Authoritative model resolution used by tokenizer AND model loading."""
+        from .model_snapshot import resolve_model_snapshot, verify_seq2seq_snapshot
 
         cfg = self._config
-        offline = self._offline
-
-        cache_root: Optional[str] = None
-        if cfg.model_cache_dir:
-            cache_root = os.path.expandvars(cfg.model_cache_dir)
-            root = Path(cache_root).expanduser().resolve()
-            cache_root = str(root)
-            if offline and not root.is_dir():
-                raise TranslationModelLoadError(
-                    f"offline mode: configured model cache does not exist: "
-                    f"{cache_root}; pre-download the model (see README) or "
-                    f"fix model_cache_dir"
-                )
-            try:
-                root.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise TranslationModelLoadError(
-                    f"cannot create configured model cache {cache_root}: {exc}"
-                ) from exc
-
+        resolved = resolve_model_snapshot(
+            model_name=cfg.model_name,
+            model_revision=cfg.model_revision,
+            model_cache_dir=cfg.model_cache_dir,
+            offline=self._offline,
+            model_family=cfg.model_family,
+            verify_snapshot=verify_seq2seq_snapshot,
+        )
         logger.info(
             "[INFO] Model cache: %s (model=%s revision=%s offline=%s)",
-            cache_root or "HF default", cfg.model_name,
-            cfg.model_revision, offline,
+            resolved.cache_dir or "HF default",
+            cfg.model_name,
+            cfg.model_revision,
+            self._offline,
         )
-
-        def _snapshot(local_only: bool) -> str:
-            kwargs = {}
-            if cache_root:
-                kwargs["cache_dir"] = cache_root
-            return snapshot_download(
-                repo_id=cfg.model_name,
-                revision=cfg.model_revision,
-                local_files_only=local_only,
-                **kwargs,
-            )
-
-        # 1) Cache-hit probe: local resolution only, never a network call.
-        try:
-            snapshot_path = _snapshot(local_only=True)
-            cache_status = "cache_hit"
-            logger.info("[INFO] Model cache HIT (reused): %s", snapshot_path)
-        except Exception as exc:
-            if offline:
-                raise TranslationModelLoadError(
-                    f"offline model cache miss: {cfg.model_name} revision "
-                    f"{cfg.model_revision} not found in cache "
-                    f"{cache_root or 'HF default'}; pre-download the model "
-                    f"or set allow_model_download=true"
-                ) from exc
-            logger.info(
-                "[INFO] Model cache MISS; downloading %s revision %s "
-                "into %s ...",
-                cfg.model_name, cfg.model_revision,
-                cache_root or "HF default",
-            )
-            try:
-                snapshot_path = _snapshot(local_only=False)
-            except Exception as exc2:
-                raise TranslationModelLoadError(
-                    f"model download failed for {cfg.model_name} revision "
-                    f"{cfg.model_revision} into {cache_root or 'HF default'}: "
-                    f"{exc2}"
-                ) from exc2
-            cache_status = "download"
-            logger.info("[INFO] Model download COMPLETE: %s", snapshot_path)
-
-        self._verify_snapshot(snapshot_path)
-        return ResolvedModel(
-            snapshot_path=snapshot_path,
-            model_name=cfg.model_name,
-            revision=cfg.model_revision,
-            cache_dir=cache_root or "",
-            cache_status=cache_status,
-            offline=offline,
-            model_family=cfg.model_family,
-        )
-
-    @staticmethod
-    def _verify_snapshot(snapshot_path: str) -> None:
-        """Fail before ready if the resolved snapshot misses required files."""
-        from pathlib import Path
-
-        root = Path(snapshot_path)
-        required = [
-            ("config.json", ["config.json"]),
-            ("model weights", ["model.safetensors", "pytorch_model.bin"]),
-            ("tokenizer files", ["tokenizer.json", "sentencepiece.bpe.model"]),
-        ]
-        missing = [
-            label for label, candidates in required
-            if not any((root / c).is_file() for c in candidates)
-        ]
-        if missing:
-            raise TranslationModelLoadError(
-                f"incomplete model snapshot at {snapshot_path}: missing "
-                f"{', '.join(missing)}; re-download the model or repair "
-                f"the cache"
-            )
+        if resolved.cache_status == "cache_hit":
+            logger.info("[INFO] Model cache HIT (reused): %s", resolved.snapshot_path)
+        else:
+            logger.info("[INFO] Model download COMPLETE: %s", resolved.snapshot_path)
+        return resolved
 
     def _load_model(self) -> None:
         import torch

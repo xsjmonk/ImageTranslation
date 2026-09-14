@@ -164,6 +164,19 @@ class TestFactory:
         translator = create_translator(cfg)
         assert translator.name == "nllb@facebook/nllb-200-distilled-600M"
 
+    def test_default_backend_is_current(self):
+        translator = create_translator(TranslationConfig())
+        assert translator.__class__.__name__ == "Seq2SeqTranslator"
+
+    def test_creates_hymt2_backend(self):
+        translator = create_translator(
+            TranslationConfig(
+                backend="hymt2",
+                model_name="tencent/Hy-MT2-Test",
+            )
+        )
+        assert translator.__class__.__name__ == "HyMt2Translator"
+
     def test_rejects_unknown(self):
         cfg = TranslationConfig(model_name="unknown/model")
         with pytest.raises(

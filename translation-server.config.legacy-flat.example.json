@@ -1,0 +1,15 @@
+{
+  // LEGACY EXAMPLE — NOT ACTIVE
+  // Flat translation settings remain supported for compatibility, but the
+  // active repository configuration uses translation.active_model +
+  // translation.models instead.
+  "server": {
+    "model_cache_dir": "D:/Caches/translation"
+  },
+  "translation": {
+    "backend": "current",
+    "model_name": "facebook/nllb-200-distilled-600M",
+    "model_family": "nllb",
+    "model_revision": "main"
+  }
+}

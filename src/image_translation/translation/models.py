@@ -36,6 +36,7 @@ class TranslationResult:
 @dataclass
 class TranslationRuntimeInfo:
     """Metadata about the loaded translation engine."""
+    backend: str = "current"
     model_name: str = ""
     model_family: str = ""
     model_revision: str = ""
@@ -54,6 +55,9 @@ class TranslationRuntimeInfo:
     local_files_only: bool = False
     offline: bool = False        # effective offline (local_files_only OR
                                  # downloads disabled)
+    tokenizer_class: str = ""
+    max_new_tokens: int = 0
+    max_input_tokens: int = 0
 
 
 @dataclass(frozen=True)

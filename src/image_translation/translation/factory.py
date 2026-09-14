@@ -18,6 +18,11 @@ def create_translator(config: TranslationConfig) -> Translator:
     Raises:
         ValueError: If the configured engine is unknown.
     """
+    if config.backend == "hymt2":
+        from .hymt2_translator import HyMt2Translator
+
+        return HyMt2Translator(config)
+
     from .seq2seq_translator import Seq2SeqTranslator
 
     return Seq2SeqTranslator(config)

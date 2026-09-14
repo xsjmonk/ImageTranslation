@@ -51,26 +51,11 @@ The FastAPI host lives in `src/translation_server/`.
 
 ## Architecture skill (all agents)
 
-Before writing or editing any programming code, tests, scripts,
-configuration, or infrastructure definition, every coding agent must read
-and follow `.agent-skills/reuse-first-architecture/SKILL.md`. The agent must
-complete its mandatory pre-coding gate before making edits, even when the
+Before writing or editing code, tests, scripts, configuration, or
+infrastructure, read and follow the canonical skill at
+`.agent-skills/reuse-first-architecture/SKILL.md`. Do not copy its contents.
+
+This gate is mandatory for every coding agent and every edit type, including
+feature additions, bug fixes, refactors, tests, scripts, configuration,
+library/dependency selection, and infrastructure definitions — even when the
 change appears small or trivial.
-
-This gate is mandatory workflow, not optional advice, and applies to:
-
-- feature additions;
-- bug fixes;
-- refactors;
-- tests and test fixtures;
-- scripts and configuration;
-- library/dependency selection;
-- infrastructure and deployment definitions.
-
-The skill enforces: search before building (reuse/adapt/extend/replace
-with named-component evidence), SOLID and dependency inversion,
-preservation of public contracts and HTML/cache/GPU invariants, and
-evidence-based implementation plus verification in one round. Its
-references (`references/`) contain the repository-specific architecture
-contracts and the verification checklist. Do not duplicate the skill text
-in this file; point to the canonical path.

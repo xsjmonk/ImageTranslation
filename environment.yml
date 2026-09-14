@@ -40,7 +40,8 @@ dependencies:
       - torch==2.12.1
       - torchvision==0.27.1
       # Translation engine
-      - transformers
+      - json5>=0.9.25
+      - transformers>=4.46.0
       - sentencepiece
       - sacremoses
       - huggingface-hub

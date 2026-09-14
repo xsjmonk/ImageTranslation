@@ -71,7 +71,7 @@ class TestLoadServerConfig:
     def test_malformed_json_fails(self, tmp_path):
         p = tmp_path / "bad.json"
         p.write_text("{nope", encoding="utf-8")
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(ValueError, match="Unexpected end"):
             load_server_config(p)
 
     def test_defaults_when_no_file(self, tmp_path, monkeypatch):
@@ -91,6 +91,9 @@ class TestLoadServerConfig:
         assert cfg.server.port == 8091
         assert cfg.runtime.warmup_on_start is True
         assert cfg.translation.device == "cuda"
+        assert cfg.active_model == "nllb"
+        assert cfg.translation.backend == "current"
+        assert cfg.translation.model_name == "facebook/nllb-200-distilled-600M"
 
 
 class TestServerConfigValidation:
@@ -106,7 +109,7 @@ class TestServerConfigValidation:
 
     def test_workers_zero(self, tmp_path):
         p = _write_config(tmp_path, {"server": {"workers": 0}})
-        with pytest.raises(ValueError, match="workers"):
+        with pytest.raises(ValueError, match="workers is fixed to 1"):
             load_server_config(p)
 
     def test_workers_gt_one_with_cuda_rejected(self, tmp_path):
@@ -117,10 +120,10 @@ class TestServerConfigValidation:
                 "translation": {"device": "cuda"},
             },
         )
-        with pytest.raises(ValueError, match="workers must be 1"):
+        with pytest.raises(ValueError, match="workers is fixed to 1"):
             load_server_config(p)
 
-    def test_workers_gt_one_with_cpu_allowed(self, tmp_path):
+    def test_workers_gt_one_rejected_even_on_cpu(self, tmp_path):
         p = _write_config(
             tmp_path,
             {
@@ -128,8 +131,8 @@ class TestServerConfigValidation:
                 "translation": {"device": "cpu"},
             },
         )
-        cfg = load_server_config(p)
-        assert cfg.server.workers == 2
+        with pytest.raises(ValueError, match="workers is fixed to 1"):
+            load_server_config(p)
 
     def test_invalid_log_level(self, tmp_path):
         p = _write_config(tmp_path, {"server": {"log_level": "verbose"}})

@@ -22,6 +22,7 @@ from .exceptions import (
     TranslationQualityError,
 )
 from .factory import create_translator
+from .hymt2_translator import HyMt2Translator
 from .html_document import HTMLDocument, compare_document_structure
 from .html_protection import ProtectionMap
 from .language_segments import classify, LanguageKind, protect_identifiers
@@ -62,6 +63,7 @@ __all__ = [
     "create_translator",
     # Implementations
     "Seq2SeqTranslator",
+    "HyMt2Translator",
     "ModelFamilyAdapter",
     "create_model_family_adapter",
     "NoopTranslator",

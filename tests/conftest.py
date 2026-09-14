@@ -12,3 +12,7 @@ if str(_src) not in sys.path:
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "gpu: test requires NVIDIA CUDA GPU and model download")
+    config.addinivalue_line(
+        "markers",
+        "hymt2_smoke: explicit Hy-MT2 GPU smoke test; set RUN_HYMT2_SMOKE=1",
+    )

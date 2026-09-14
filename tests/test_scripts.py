@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,17 +50,72 @@ def test_power_shell_script_parses(script_name: str):
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_translation_launcher_targets_nllb_and_existing_runtime():
+def test_translation_launcher_uses_python_config_summary():
     text = (SCRIPT_DIR / "Start-TranslationServer.ps1").read_text(
         encoding="utf-8"
     )
     lowered = text.lower()
     assert "m2m100" not in lowered
-    assert "facebook/nllb-200-distilled-600m" in lowered
+    assert "get-content -raw -path $configpath" not in lowered
+    assert "--print-config-summary" in lowered
     assert "envs\\dp\\python.exe" in lowered
     assert "translation_server" in lowered
     assert "'-c', $configpath" in lowered
     assert "$env:pythonpath = join-path $reporoot 'src'" in lowered
+    assert "could not load config summary" in lowered
+
+
+def test_startup_script_config_summary_matches_loader(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg_path = tmp_path / "commented.jsonc"
+    cfg_path.write_text(
+        """
+        {
+          // Hy-MT2 opt-in profile
+          "server": { "model_cache_dir": "%s" },
+          "translation": {
+            "active_model": "hymt2",
+            "models": {
+              "nllb": {
+                "backend": "current",
+                "model_name": "facebook/nllb-200-distilled-600M",
+                "model_family": "nllb",
+                "model_revision": "main"
+              },
+              "hymt2": {
+                "backend": "hymt2",
+                "model_name": "tencent/Hy-MT2-1.8B-FP8",
+                "model_family": "hymt2",
+                "model_revision": "main"
+              }
+            }
+          }
+        }
+        """ % str(cache).replace("\\", "/"),
+        encoding="utf-8",
+    )
+    env = {"PYTHONPATH": str(ROOT / "src")}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "translation_server",
+            "--print-config-summary",
+            "-c",
+            str(cfg_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        env={**dict(**__import__("os").environ), **env},
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["active_model"] == "hymt2"
+    assert summary["backend"] == "hymt2"
+    assert summary["model"] == "tencent/Hy-MT2-1.8B-FP8"
 
 
 def test_environment_initializer_has_no_runtime_side_effects():
