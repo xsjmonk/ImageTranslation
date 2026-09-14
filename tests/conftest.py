@@ -14,5 +14,21 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "gpu: test requires NVIDIA CUDA GPU and model download")
     config.addinivalue_line(
         "markers",
+        "quality_regression: explicit GPU quality suite; set RUN_QUALITY_REGRESSION=1",
+    )
+    config.addinivalue_line(
+        "markers",
+        "html_gpu_quality: explicit HTML GPU suite; set RUN_HTML_GPU_QUALITY=1",
+    )
+    config.addinivalue_line(
+        "markers",
+        "nllb_smoke: explicit NLLB GPU smoke test; set RUN_NLLB_SMOKE=1",
+    )
+    config.addinivalue_line(
+        "markers",
         "hymt2_smoke: explicit Hy-MT2 GPU smoke test; set RUN_HYMT2_SMOKE=1",
+    )
+    config.addinivalue_line(
+        "markers",
+        "hymt2_cached_smoke: cached Hy-MT2 snapshot smoke; set RUN_HYMT2_CACHED_SMOKE=1",
     )

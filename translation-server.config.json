@@ -12,11 +12,8 @@
   },
 
   "translation": {
-    // Switch engines: uncomment exactly one active_model line and restart.
-    // Active — NLLB seq2seq (default; normalized backend identifier is "current"):
-    "active_model": "nllb",
-    // Opt-in — Hy-MT2 causal LM:
-    // "active_model": "hymt2",
+    // To opt in to Hy-MT2, change the active value to "hymt2" and restart.
+    "active_model": "hymt2",
 
     // Shared by every translation model profile.
     "source_language": "zho_Hans",

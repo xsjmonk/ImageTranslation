@@ -280,3 +280,7 @@ These repository rules are labeled so the skill stays reusable elsewhere:
 - [ImageTranslation] cache, offline, revision, GPU, precision, and
   language-pair policies have one owner.
 - [ImageTranslation] `environment.yml` is the dependency source of truth.
+- [ImageTranslation] the XS client (`script/TestTranslationApi.xs`) and
+  other HTTP callers depend on `POST /translate` with JSON fields
+  `text`, `format`, and `style`, and a JSON response field `translation`;
+  backend/model selection must not change that contract.

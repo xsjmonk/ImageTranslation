@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from typing import List, Optional, Sequence
+
+import torch
 
 from .base import Translator
 from .config import TranslationConfig, TranslationStyle, resolve_translation_style
@@ -49,6 +52,7 @@ class HyMt2Translator(Translator):
         self._resolved: Optional[ResolvedModel] = None
         self._offline = config.local_files_only or not config.allow_model_download
         self._lock = threading.Lock()
+        self._encode_used_chat_template = False
 
     @property
     def name(self) -> str:
@@ -169,32 +173,97 @@ class HyMt2Translator(Translator):
             f"{text}"
         )
 
-    def _encode_prompts(self, prompts: Sequence[str]) -> dict:
+    def _tokenizer_has_chat_template(self, tokenizer: object) -> bool:
+        template = getattr(tokenizer, "chat_template", None)
+        if template:
+            return True
+        getter = getattr(tokenizer, "get_chat_template", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return False
+
+    def _normalize_encoded_batch(
+        self,
+        encoded: object,
+        *,
+        expected_batch_size: int,
+    ) -> dict[str, torch.Tensor]:
+        if isinstance(encoded, torch.Tensor):
+            input_ids = encoded
+            return {
+                "input_ids": input_ids,
+                "attention_mask": torch.ones_like(input_ids),
+            }
+
+        if not isinstance(encoded, Mapping):
+            raise TranslationModelLoadError(
+                "Hy-MT2 chat template encoding returned unexpected type: "
+                f"{type(encoded)!r}"
+            )
+
+        normalized = dict(encoded)
+        input_ids = normalized.get("input_ids")
+        if input_ids is None:
+            raise TranslationModelLoadError(
+                "Hy-MT2 chat template encoding missing input_ids"
+            )
+        if int(input_ids.shape[0]) != expected_batch_size:
+            raise TranslationModelLoadError(
+                "Hy-MT2 chat template batch size mismatch: "
+                f"expected {expected_batch_size}, got {input_ids.shape[0]}"
+            )
+        if len(input_ids.shape) != 2:
+            raise TranslationModelLoadError(
+                "Hy-MT2 chat template input_ids must be a 2-D batch tensor"
+            )
+        return normalized
+
+    def _encode_prompts(self, prompts: Sequence[str]) -> dict[str, torch.Tensor]:
         tokenizer = self._tokenizer
         assert tokenizer is not None
-        if hasattr(tokenizer, "apply_chat_template"):
+
+        if self._tokenizer_has_chat_template(tokenizer):
+            if not hasattr(tokenizer, "apply_chat_template"):
+                raise TranslationModelLoadError(
+                    "Hy-MT2 tokenizer advertises a chat template but "
+                    "apply_chat_template is unavailable"
+                )
+            messages_batch = [
+                [{"role": "user", "content": prompt}] for prompt in prompts
+            ]
             try:
-                messages_batch = [
-                    [{"role": "user", "content": prompt}] for prompt in prompts
-                ]
                 encoded = tokenizer.apply_chat_template(
                     messages_batch,
                     return_tensors="pt",
+                    return_dict=True,
                     padding=True,
                     add_generation_prompt=True,
                     truncation=False,
                 )
-                if isinstance(encoded, dict):
-                    return encoded
-            except Exception:
-                logger.debug(
-                    "chat template unavailable; falling back to plain tokenization"
-                )
-        return tokenizer(
+            except Exception as exc:
+                raise TranslationModelLoadError(
+                    f"Failed to apply Hy-MT2 chat template: {exc}"
+                ) from exc
+            self._encode_used_chat_template = True
+            return self._normalize_encoded_batch(
+                encoded,
+                expected_batch_size=len(prompts),
+            )
+
+        # Compatibility path for tokenizers without a chat template (test doubles).
+        self._encode_used_chat_template = False
+        encoded = tokenizer(
             list(prompts),
             return_tensors="pt",
             padding=True,
             truncation=False,
+        )
+        return self._normalize_encoded_batch(
+            encoded,
+            expected_batch_size=len(prompts),
         )
 
     def _resolve_device(self) -> str:
@@ -349,12 +418,13 @@ class HyMt2Translator(Translator):
             encoded = self._encode_prompts(prompts)
             input_ids = encoded["input_ids"]
             attention_mask = encoded.get("attention_mask")
+            input_width = int(input_ids.shape[1])
             prompt_lengths = (
                 attention_mask.sum(dim=1).tolist()
                 if attention_mask is not None
-                else [input_ids.shape[1]] * input_ids.shape[0]
+                else [input_width] * input_ids.shape[0]
             )
-            actual_tokens = int(input_ids.shape[1])
+            actual_tokens = int(max(prompt_lengths))
             source_token_estimate = max(
                 int(length) for length in prompt_lengths
             )
@@ -390,6 +460,9 @@ class HyMt2Translator(Translator):
             }
             if attention_mask is not None:
                 generation_kwargs["attention_mask"] = attention_mask
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+            if pad_token_id is not None:
+                generation_kwargs["pad_token_id"] = pad_token_id
             if policy.do_sample:
                 generation_kwargs["temperature"] = gen_cfg.temperature
             if not policy.do_sample:
@@ -402,8 +475,7 @@ class HyMt2Translator(Translator):
 
             results: List[TranslationResult] = []
             for index, source_text in enumerate(texts):
-                prompt_len = int(prompt_lengths[index])
-                new_tokens = generated[index][prompt_len:]
+                new_tokens = generated[index, input_width:]
                 translated = tokenizer.decode(
                     new_tokens, skip_special_tokens=True
                 ).strip()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import os
 import re
 import threading
 import time
@@ -23,6 +24,10 @@ except Exception:
 pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not _CUDA_OK, reason="NVIDIA CUDA GPU required"),
+    pytest.mark.skipif(
+        os.environ.get("RUN_HTML_GPU_QUALITY") != "1",
+        reason="Set RUN_HTML_GPU_QUALITY=1 to run HTML GPU quality tests",
+    ),
 ]
 
 CORRUPTION_MARKERS = ["reference", "referral", "cell phone"]

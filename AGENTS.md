@@ -20,8 +20,30 @@ python -m image_translation <input-path> [-c <config>]
 
 ## Testing
 
+Default unit suite (fast, mocked — no GPU model load):
+
 ```powershell
 conda run -n dp python -m pytest tests/ -v
+```
+
+This skips GPU integration tests unless you opt in with environment variables.
+On a CUDA machine, the full suite used to load real NLLB/Hy-MT2 weights and
+could take 20+ minutes; the default run should finish in a few minutes.
+
+Opt-in GPU/integration runs:
+
+```powershell
+$env:RUN_QUALITY_REGRESSION = "1"   # tests/translation/test_quality_regression.py
+$env:RUN_HTML_GPU_QUALITY = "1"    # tests/translation/test_html_gpu_quality.py
+$env:RUN_NLLB_SMOKE = "1"          # tests/translation/smoke_test.py
+$env:RUN_HYMT2_SMOKE = "1"         # tests/translation/test_hymt2_smoke.py
+$env:RUN_HYMT2_CACHED_SMOKE = "1"  # tests/translation/test_hymt2_cached_snapshot_smoke.py
+```
+
+Focused translation-server tests (~17 seconds):
+
+```powershell
+conda run -n dp python -m pytest tests/translation_server/ -v
 ```
 
 `tests/conftest.py` adds `src/` to `sys.path` automatically — no setup beyond `script\Initialize-Env.ps1`.

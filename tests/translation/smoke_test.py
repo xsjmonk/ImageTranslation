@@ -1,10 +1,13 @@
 """GPU integration test — requires CUDA, downloads NLLB model (~1.7 GB).
 
 Excluded from default unit suite. Run explicitly:
-    python tests/translation/smoke_test.py
-Or:
+    $env:RUN_NLLB_SMOKE = "1"
     pytest tests/translation/smoke_test.py -v -s
+Or:
+    python tests/translation/smoke_test.py
 """
+
+import os
 
 import pytest
 
@@ -19,6 +22,10 @@ except Exception:
 pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not _CUDA_OK, reason="NVIDIA CUDA GPU required"),
+    pytest.mark.skipif(
+        os.environ.get("RUN_NLLB_SMOKE") != "1",
+        reason="Set RUN_NLLB_SMOKE=1 to run the NLLB GPU smoke test",
+    ),
 ]
 
 

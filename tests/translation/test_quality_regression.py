@@ -9,6 +9,7 @@ Run explicitly (needs NVIDIA CUDA + the NLLB model, ~2 GB VRAM):
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -23,6 +24,10 @@ except Exception:
 pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not _CUDA_OK, reason="NVIDIA CUDA GPU required"),
+    pytest.mark.skipif(
+        os.environ.get("RUN_QUALITY_REGRESSION") != "1",
+        reason="Set RUN_QUALITY_REGRESSION=1 to run GPU quality regression tests",
+    ),
 ]
 
 # ---------------------------------------------------------------------------

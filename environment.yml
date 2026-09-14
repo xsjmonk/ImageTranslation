@@ -42,6 +42,7 @@ dependencies:
       # Translation engine
       - json5>=0.9.25
       - transformers>=4.46.0
+      - compressed-tensors>=0.15.0
       - sentencepiece
       - sacremoses
       - huggingface-hub

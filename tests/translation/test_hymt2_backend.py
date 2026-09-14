@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,18 +11,101 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from image_translation.translation.config import GenerationConfig, TranslationConfig
+from image_translation.translation.config import GenerationConfig, StructuredConfig, TranslationConfig
 from image_translation.translation.factory import create_translator
 from image_translation.translation.hymt2_translator import HyMt2Translator
 from image_translation.translation.language_names import resolve_language_name
 from image_translation.translation.models import ResolvedModel
+from image_translation.translation.structured_translation import StructuredTranslator
 from translation_server.config import load_server_config
 
 
+class FakeBatchEncoding(Mapping):
+    """Mapping-like tokenizer output that is not a built-in dict."""
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 class FakeTokenizer:
+    chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+
     def __init__(self) -> None:
         self.pad_token_id = 0
         self.eos_token_id = 2
+        self.plain_tokenizer_used = False
+        self.chat_template_calls: list[dict] = []
+
+    def apply_chat_template(
+        self,
+        messages_batch,
+        return_tensors="pt",
+        return_dict=True,
+        padding=True,
+        add_generation_prompt=True,
+        truncation=False,
+    ):
+        self.chat_template_calls.append(
+            {
+                "return_dict": return_dict,
+                "add_generation_prompt": add_generation_prompt,
+                "padding": padding,
+                "truncation": truncation,
+            }
+        )
+        rows = []
+        for messages in messages_batch:
+            text = messages[0]["content"]
+            rows.append([10 + len(text) % 5, 20 + len(text) % 3, 30])
+        max_len = max(len(row) for row in rows)
+        padded = []
+        masks = []
+        for row in rows:
+            pad_len = max_len - len(row)
+            padded.append(row + [0] * pad_len)
+            masks.append([1] * len(row) + [0] * pad_len)
+        return FakeBatchEncoding(
+            {
+                "input_ids": torch.tensor(padded, dtype=torch.long),
+                "attention_mask": torch.tensor(masks, dtype=torch.long),
+            }
+        )
+
+    def __call__(self, texts, return_tensors="pt", padding=True, truncation=False):
+        self.plain_tokenizer_used = True
+        raise AssertionError(
+            "plain tokenizer must not be used when a chat template is available"
+        )
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        values = tuple(
+            token_ids.tolist() if hasattr(token_ids, "tolist") else list(token_ids)
+        )
+        decode_map = {
+            (100, 110): "Hello",
+            (101, 111): "World",
+            (102, 112): "Alpha",
+            (103, 113): "Beta",
+        }
+        return decode_map.get(values, f"GEN-{'-'.join(map(str, values))}")
+
+
+class FakePlainTokenizer(FakeTokenizer):
+    """Test double without a chat template (compatibility-only path)."""
+
+    chat_template = None
+
+    def apply_chat_template(self, *args, **kwargs):
+        raise AssertionError("apply_chat_template must not be called")
 
     def __call__(self, texts, return_tensors="pt", padding=True, truncation=False):
         batch = []
@@ -33,10 +117,6 @@ class FakeTokenizer:
             "attention_mask": torch.ones_like(input_ids),
         }
 
-    def decode(self, token_ids, skip_special_tokens=True):
-        values = token_ids.tolist() if hasattr(token_ids, "tolist") else list(token_ids)
-        return f"translated-{sum(values)}"
-
 
 class FakeCausalModel(torch.nn.Module):
     def __init__(self) -> None:
@@ -44,8 +124,10 @@ class FakeCausalModel(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.zeros(1))
 
     def generate(self, input_ids, attention_mask=None, **kwargs):
-        suffix = torch.tensor([[9, 10]], dtype=input_ids.dtype)
-        return torch.cat([input_ids, suffix.repeat(input_ids.shape[0], 1)], dim=1)
+        batch, _width = input_ids.shape
+        suffix_rows = [[100 + index, 110 + index] for index in range(batch)]
+        suffix = torch.tensor(suffix_rows, dtype=input_ids.dtype)
+        return torch.cat([input_ids, suffix], dim=1)
 
     def eval(self):
         return self
@@ -72,7 +154,7 @@ def hymt2_config(tmp_path):
     )
 
 
-def _patch_hymt2_load(monkeypatch, tmp_path):
+def _patch_hymt2_load(monkeypatch, tmp_path, tokenizer_factory=FakeTokenizer):
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     (snapshot / "config.json").write_text("{}", encoding="utf-8")
@@ -95,7 +177,7 @@ def _patch_hymt2_load(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "transformers.AutoTokenizer.from_pretrained",
-        lambda *args, **kwargs: FakeTokenizer(),
+        lambda *args, **kwargs: tokenizer_factory(),
     )
     monkeypatch.setattr(
         "transformers.AutoModelForCausalLM.from_pretrained",
@@ -218,8 +300,11 @@ class TestHyMt2AdapterContract:
         _patch_hymt2_load(monkeypatch, tmp_path)
         translator = HyMt2Translator(hymt2_config)
         result = translator.translate_text("德国蔡司纯钛眼镜")
-        assert result.translated_text.startswith("translated-")
+        assert result.translated_text == "Hello"
+        assert "Translate the following text into English" not in result.translated_text
         assert result.translated_text != "德国蔡司纯钛眼镜"
+        assert not result.translated_text.startswith("translated-")
+        assert translator._encode_used_chat_template is True
 
     def test_model_load_failure_is_explicit(self, monkeypatch, hymt2_config, tmp_path):
         snapshot = tmp_path / "snapshot"
@@ -277,7 +362,8 @@ class TestPlainTextRegression:
 
     def test_short_phrase_not_invented_sentence(self):
         result = self.translator.translate_text("加厚防水面料")
-        assert result.translated_text.startswith("translated-")
+        assert result.translated_text == "Hello"
+        assert not result.translated_text.startswith("translated-")
 
     def test_mixed_model_numbers_preserved_in_source(self):
         source = "适合 iPhone 15 Pro Max 与 UV400 防护"
@@ -289,6 +375,99 @@ class TestPlainTextRegression:
         texts = ["第一段", "第二段", "第三段"]
         results = self.translator.translate_batch_texts(texts)
         assert [item.source_text for item in results] == texts
+        assert [item.translated_text for item in results] == [
+            "Hello",
+            "World",
+            "Alpha",
+        ]
+
+
+class TestHyMt2ChatTemplateRegression:
+    def test_batchencoding_is_accepted_and_chat_template_is_used(
+        self, monkeypatch, hymt2_config, tmp_path
+    ):
+        _patch_hymt2_load(monkeypatch, tmp_path)
+        translator = HyMt2Translator(hymt2_config)
+        result = translator.translate_text("你好")
+        tokenizer = translator._tokenizer
+        assert tokenizer is not None
+        assert result.translated_text == "Hello"
+        assert tokenizer.chat_template_calls
+        assert tokenizer.chat_template_calls[-1]["return_dict"] is True
+        assert tokenizer.chat_template_calls[-1]["add_generation_prompt"] is True
+        assert tokenizer.plain_tokenizer_used is False
+        assert translator._encode_used_chat_template is True
+
+    def test_chat_template_failure_is_explicit(self, monkeypatch, hymt2_config, tmp_path):
+        _patch_hymt2_load(monkeypatch, tmp_path)
+        translator = HyMt2Translator(hymt2_config)
+        translator._ensure_loaded()
+        tokenizer = translator._tokenizer
+        assert tokenizer is not None
+
+        def _fail(*args, **kwargs):
+            raise RuntimeError("template exploded")
+
+        tokenizer.apply_chat_template = _fail
+        with pytest.raises(Exception, match="Failed to apply Hy-MT2 chat template"):
+            translator.translate_text("你好")
+
+    def test_plain_tokenizer_only_without_chat_template(
+        self, monkeypatch, hymt2_config, tmp_path
+    ):
+        _patch_hymt2_load(
+            monkeypatch,
+            tmp_path,
+            tokenizer_factory=lambda: FakePlainTokenizer(),
+        )
+        translator = HyMt2Translator(hymt2_config)
+        result = translator.translate_text("你好")
+        assert result.translated_text == "Hello"
+        assert translator._encode_used_chat_template is False
+
+    def test_padded_batch_decoding_has_no_prompt_leakage(
+        self, monkeypatch, hymt2_config, tmp_path
+    ):
+        _patch_hymt2_load(monkeypatch, tmp_path)
+        translator = HyMt2Translator(hymt2_config)
+        short = "短"
+        long = "这是一个明显更长的中文句子用于测试填充批次"
+        results = translator.translate_batch_texts([short, long])
+        assert [item.translated_text for item in results] == ["Hello", "World"]
+        assert all("Translate the following text" not in item.translated_text for item in results)
+
+
+class TestHyMt2StructuredMixedHtmlRegression:
+    HTML = (
+        '<p>德国蔡司<span class="brand">ZEISS</span>纯钛眼镜</p>'
+        '<p>适合 iPhone 16 Pro 与 USB-C1 使用</p>&nbsp;&amp;'
+    )
+
+    def test_mixed_document_preserves_structure_and_order(
+        self, monkeypatch, hymt2_config, tmp_path
+    ):
+        _patch_hymt2_load(monkeypatch, tmp_path)
+        translator = HyMt2Translator(hymt2_config)
+        structured = StructuredTranslator(
+            translator,
+            StructuredConfig(
+                max_segment_tokens=450,
+                max_target_tokens=400,
+                batch_size=2,
+            ),
+            translation_config=hymt2_config,
+        )
+        result = structured.translate(self.HTML)
+        assert "<span" in result.translated_html
+        assert "ZEISS" in result.translated_html
+        assert "&nbsp;" in result.translated_html
+        assert "&amp;" in result.translated_html
+        assert "iPhone 16 Pro" in result.translated_html
+        assert result.translated_html.index("<p>") < result.translated_html.index(
+            "iPhone 16 Pro"
+        )
+        assert "Hello" in result.translated_html or "World" in result.translated_html
+        assert "UCLA" not in result.translated_html
 
 
 class TestHtmlRegressionUsesStructuredPipeline:
@@ -310,9 +489,6 @@ class TestHtmlRegressionUsesStructuredPipeline:
             ]
 
         monkeypatch.setattr(translator, "translate_batch_texts", _batch)
-        from image_translation.translation.structured_translation import StructuredTranslator
-        from image_translation.translation.config import StructuredConfig
-
         structured = StructuredTranslator(
             translator,
             StructuredConfig(max_segment_tokens=450, max_target_tokens=400),

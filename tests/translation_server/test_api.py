@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +17,9 @@ from image_translation.translation.exceptions import (
 )
 from image_translation.translation.models import TranslationResult, TranslationRuntimeInfo
 from image_translation.translation.text_utils import preprocess
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +212,64 @@ class TestTranslate:
     def test_malformed_json_422(self, client):
         resp = client.post("/translate", data="{not json", headers={"Content-Type": "application/json"})
         assert resp.status_code == 422
+
+
+class TestXsClientApiContract:
+    """Parity with script/TestTranslationApi.xs and the XS TranslateText() client.
+
+    The XS client posts to POST /translate with JSON
+    {"text": ..., "format": "plain", "style": ...} and reads response.translation.
+    Model/backend selection must not change this HTTP contract.
+    """
+
+    @pytest.mark.parametrize("style", ["sentence", "phrase"])
+    def test_xs_json_request_returns_translation_field(self, client, style):
+        resp = client.post(
+            "/translate",
+            json={"text": "加厚防水面料", "format": "plain", "style": style},
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data.keys()) == {"translation"}
+        assert isinstance(data["translation"], str)
+        assert data["translation"]
+
+    def test_xs_route_and_content_type_unchanged(self):
+        xs_text = (ROOT / "script" / "TestTranslationApi.xs").read_text(encoding="utf-8")
+        assert "http://127.0.0.1:8091/translate" in xs_text
+        assert "format" in xs_text and "plain" in xs_text
+        assert "style" in xs_text
+        assert "translation" in xs_text
+        assert "Content-Type" in xs_text and "application/json" in xs_text
+
+
+class TestApiExactBackendResult:
+    SENTINEL = "BACKEND-SENTINEL-42"
+
+    def test_translate_returns_exact_backend_translation(self):
+        class SentinelTranslator(FakeTranslator):
+            def translate_text(
+                self, text, source_lang="zh", target_lang="en", style=None
+            ):
+                cleaned = preprocess(text, max_characters=self._max)
+                return TranslationResult(
+                    source_text=cleaned,
+                    translated_text=TestApiExactBackendResult.SENTINEL,
+                    source_language=source_lang,
+                    target_language=target_lang,
+                    model_name="fake",
+                    device="cpu",
+                )
+
+        client = _make_client(SentinelTranslator())
+        resp = client.post(
+            "/translate",
+            json={"text": "你好", "format": "plain", "style": "sentence"},
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"translation": self.SENTINEL}
 
 
 # ---------------------------------------------------------------------------
