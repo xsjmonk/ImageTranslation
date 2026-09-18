@@ -11,10 +11,13 @@ os.environ.setdefault("TMPDIR", str(_workspace_tmp))
 os.environ.setdefault("TEMP", str(_workspace_tmp))
 os.environ.setdefault("TMP", str(_workspace_tmp))
 
-# Add src/ to sys.path so `import image_translation` works
-_src = Path(__file__).resolve().parent.parent / "src"
+# Add src/ and repo root so `image_translation` and `LocalImageProcessing` import
+_repo = Path(__file__).resolve().parent.parent
+_src = _repo / "src"
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
+if str(_repo) not in sys.path:
+    sys.path.insert(0, str(_repo))
 
 
 def pytest_configure(config):

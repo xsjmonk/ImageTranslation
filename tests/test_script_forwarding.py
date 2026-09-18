@@ -9,7 +9,7 @@ def test_powershell_script_contains_output_forwarding():
     )
     text = script.read_text(encoding="utf-8")
     assert "OutputFolder" in text
-    assert '"-o", $OutputFolder' in text
+    assert "'-o', $OutputFolder" in text or '"-o", $OutputFolder' in text
 
 
 def test_shell_script_contains_output_forwarding():

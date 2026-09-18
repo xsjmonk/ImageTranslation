@@ -1,28 +1,17 @@
 <#
 .SYNOPSIS
-    Run the local manifest image processor inside the dp conda environment.
+    Validate the dp conda environment for local image-processing dependencies.
 
 .DESCRIPTION
-    Resolves the ImageTranslation repository and dp environment explicitly.
-    Does not depend on the caller's current directory for repo or PYTHONPATH.
+    Read-only check. Resolves the ImageTranslation repository and dp Python
+    executable explicitly; does not depend on the caller's current directory.
 
-    Agent-neutral contract:
-      process-image-manifest --manifest <manifest.json> [--output <folder>] [--dry-run]
-
-    Requires a initialized conda environment:
+    Requires an initialized conda environment:
       .\script\Initialize-Env.ps1
 
 .EXAMPLE
-    .\Process-ImageManifest.ps1 --manifest .\job.json --dry-run
-
-.EXAMPLE
-    .\Process-ImageManifest.ps1 check-env
+    .\Check-LocalImageEnv.ps1
 #>
-
-param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$Args
-)
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -82,30 +71,17 @@ else {
     $CondaRoot = Split-Path -Parent $CondaParent
 }
 $EnvPython = Join-Path $CondaRoot "envs\$EnvName\python.exe"
-if (Test-Path $EnvPython) {
-    $LaunchCmd = $EnvPython
-}
-else {
+if (-not (Test-Path $EnvPython)) {
     Write-LauncherError "Conda environment '$EnvName' not found at: $EnvPython"
     Write-LauncherError "Run: $RepoRoot\script\Initialize-Env.ps1"
     exit 1
 }
 
+Write-Host "[INFO] Repo root: $RepoRoot" -ForegroundColor Gray
+Write-Host "[INFO] Python:    $EnvPython" -ForegroundColor Gray
+
 $env:PYTHONPATH = $SrcRoot
 $env:IMAGE_TRANSLATION_REPO = $RepoRoot
 
-$cliArgs = @()
-if ($Args -and $Args.Count -gt 0) {
-    if ($Args.Count -eq 1 -and $Args[0] -eq 'check-env') {
-        $cliArgs = @('--check-env')
-    }
-    else {
-        $cliArgs = $Args
-    }
-}
-else {
-    $cliArgs = @('--help')
-}
-
-& $LaunchCmd -m image_translation.local_manifest @cliArgs
+& $EnvPython -m image_translation.local_env --check-env
 exit $LASTEXITCODE

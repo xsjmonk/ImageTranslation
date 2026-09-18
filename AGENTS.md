@@ -71,32 +71,38 @@ The shared translation module lives in `src/image_translation/translation/`.
 The FastAPI host lives in `src/translation_server/`.  
 **Never** let the shared module import FastAPI. FastAPI depends on the shared module, not vice versa.
 
-## Local image manifest processor
+## Local image processing (translate-image skill)
 
-Deterministic pixel work for the `translate-image` skill (masks, inpainting, compositing).
-It does **not** OCR or translate text.
+Deterministic pixel work lives in `LocalImageProcessing/` at the repository
+root. The host agent performs recognition and translation; the module handles
+manifest validation, masking, inpainting, rendering, diagnostics, and atomic
+outputs. It does **not** OCR, translate, load models, or call remote services.
 
-Initialize once:
+```powershell
+$env:PYTHONPATH = "."
+conda run -n dp python -m LocalImageProcessing process --manifest manifest.json -o .\work_processed
+conda run -n dp python -m LocalImageProcessing check-env
+```
+
+`LocalImageProcessing` is self-contained and does not import `image_translation`.
+Tests use the writable `.pytest_tmp/` directory when the system temp folder is inaccessible.
+
+Environment setup and read-only dependency checks:
 
 ```powershell
 .\script\Initialize-Env.ps1
+.\script\Check-LocalImageEnv.ps1
 ```
 
-Agent-neutral command contract:
+Skill wrappers:
 
 ```powershell
-.\script\Process-ImageManifest.ps1 check-env
-.\script\Process-ImageManifest.ps1 --manifest .\job.json [--output .\out] [--dry-run]
+D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\check-local-image-env.ps1
+D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\translate-image.ps1 -Manifest manifest.json
 ```
 
-Skill wrapper (explicit repo resolution):
-
-```powershell
-D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\process-image-manifest.ps1 check-env
-```
-
-Override repository path with `IMAGE_TRANSLATION_REPO` when needed.
-See `docs/local-image-tools.md` for full assumptions.
+Authoritative contract: `LocalImageProcessing/README.md`  
+Overview: `docs/local-image-tools.md`
 
 ## Architecture skill (all agents)
 

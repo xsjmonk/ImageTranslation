@@ -1,70 +1,189 @@
-# Local image tools (conda environment)
+# Local image tools
 
-The `translate-image` skill uses deterministic local pixel operations from the
-ImageTranslation repository. Recognition and translation stay with the agent;
-this environment supports masks, inpainting, compositing, and manifest I/O only.
+
+
+Repository-owned deterministic image operations for the `translate-image` skill
+
+and other callers.
+
+
+
+## Module
+
+
+
+- **Path:** `LocalImageProcessing/`
+
+- **Contract:** `LocalImageProcessing/README.md` (version `1.0`)
+
+- **Entry point:** `python -m LocalImageProcessing`
+
+
+
+The module validates agent manifests, performs masking/inpainting/rendering, and
+
+writes candidate outputs plus diagnostics. It does **not** OCR, translate,
+
+classify logos, load models, or make remote calls.
+
+
 
 ## Environment
 
-- **Single conda environment:** `dp` (declared in `environment.yml`)
+
+
+- **Conda environment:** `dp` (from `environment.yml`)
+
 - **Initialize / update (idempotent):**
 
-```powershell
-cd D:\Drop\outlook.com\LocalBox\ImageTranslation
-.\script\Initialize-Env.ps1
-```
 
-This creates or updates `dp`, validates every dependency in `environment.yml`,
-and runs a local image import smoke test (`python -m image_translation.local_manifest --check-env`).
-
-Do **not** run `pip install` during normal image processing. Add packages only
-through `environment.yml`, then re-run `Initialize-Env.ps1`.
-
-## Required packages (local tools)
-
-| Capability | Packages |
-|------------|----------|
-| Load/save JPG, PNG, WebP, BMP, TIFF | `pillow`, `opencv`, `imageio` |
-| Arrays and blur/inpaint math | `numpy`, `scipy`, `scikit-image` |
-| Polygon masks | `shapely`, `pyclipper`, `opencv` |
-| Manifest validation / CLI | `pydantic`, `jsonschema`, `typer`, `rich` |
-
-Translation/OCR packages in the same environment are unrelated to local manifest
-processing and are not initialized by these launchers.
-
-## Command contract
-
-From the repository:
 
 ```powershell
-.\script\Process-ImageManifest.ps1 check-env
-.\script\Process-ImageManifest.ps1 --manifest <manifest.json> [--output <folder>] [--dry-run]
+
+D:\Drop\outlook.com\LocalBox\ImageTranslation\script\Initialize-Env.ps1
+
 ```
 
-From the skill folder:
+
+
+Do **not** use ad-hoc `pip install` during setup checks. Change
+
+`environment.yml` and re-run `Initialize-Env.ps1` instead.
+
+
+
+## Required local packages
+
+
+
+| Purpose | Packages |
+
+|---------|----------|
+
+| Load/save common formats | `pillow`, `opencv`, `imageio` |
+
+| Arrays, filters, inpaint math | `numpy`, `scipy`, `scikit-image` |
+
+| Polygon geometry | `shapely`, `pyclipper` |
+
+| Config/validation utilities | `pydantic`, `jsonschema`, `pyyaml` |
+
+
+
+OCR/translation packages remain in the same environment because they are already
+
+declared in `environment.yml`. Local image processing does **not** load them.
+
+
+
+## Commands
+
+
+
+Repository:
+
+
 
 ```powershell
-D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\process-image-manifest.ps1 check-env
+
+$env:PYTHONPATH = "D:\Drop\outlook.com\LocalBox\ImageTranslation"
+
+conda run -n dp python -m LocalImageProcessing check-env
+
+conda run -n dp python -m LocalImageProcessing process --manifest manifest.json -o D:\work\photos_processed
+
 ```
 
-Launchers resolve:
 
-- repository root (`IMAGE_TRANSLATION_REPO` override supported);
-- `PYTHONPATH=<repo>\src`;
-- conda env `dp` (`IMAGE_TRANSLATION_CONDA_ENV` override supported).
+
+Read-only environment check:
+
+
+
+```powershell
+
+D:\Drop\outlook.com\LocalBox\ImageTranslation\script\Check-LocalImageEnv.ps1
+
+```
+
+
+
+Skill wrappers:
+
+
+
+```powershell
+
+D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\check-local-image-env.ps1
+
+D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\translate-image.ps1 -Manifest manifest.json -OutputFolder D:\work\photos_processed
+
+```
+
+
+
+Override repository path with `IMAGE_TRANSLATION_REPO` when needed.
+
+Override environment name with `IMAGE_TRANSLATION_CONDA_ENV` when needed.
+
+`process` exit codes: `0` success/skipped only, `1` hard failure, `2` partial/review without failure.
+
+## Testing
+
+Default repository tests configure a writable temp base at `.pytest_tmp/` when the
+system temp directory is inaccessible on Windows.
+
+```powershell
+conda run -n dp python -m pytest tests/local_image_processing -v
+conda run -n dp python -m pytest tests/ -v
+```
+
+## Outputs
+
+
+
+```text
+
+<output>_processed/
+
+    original_image01.jpg
+
+    image01.jpg
+
+    metadata/
+
+        image01.json
+
+    summary.json
+
+```
+
+
+
+- Preserved originals use the exact `original_<source filename>` prefix.
+
+- Candidates are written separately until the host agent approves promotion.
+
+- Use `--promote` / `-Promote` only after visual QA.
+
+
 
 ## Failure messages
 
+
+
 | Problem | Action |
+
 |---------|--------|
+
 | Conda not found | Install Miniconda/Anaconda |
-| `dp` missing | Run `.\script\Initialize-Env.ps1` |
-| Import check fails | Re-run `Initialize-Env.ps1` after editing `environment.yml` |
-| Launcher not found from skill | Set `IMAGE_TRANSLATION_REPO` to the ImageTranslation root |
 
-## Python entry point
+| `dp` missing | Run `Initialize-Env.ps1` |
 
-```powershell
-$env:PYTHONPATH = "D:\Drop\outlook.com\LocalBox\ImageTranslation\src"
-conda run -n dp python -m image_translation.local_manifest --check-env
-```
+| Import/operation check fails | Re-run `Initialize-Env.ps1` after editing `environment.yml` |
+
+| Manifest validation fails | Fix geometry, actions, or missing `translated_text` |
+
+| Skill launcher not found | Set `IMAGE_TRANSLATION_REPO` to the repository root |
+
+
