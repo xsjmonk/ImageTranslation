@@ -42,6 +42,7 @@ from .phrase_policy import (
     content_token_count,
     validate_phrase_output,
 )
+from .server_translator import ServerTranslator
 from .translator import NoopTranslator
 
 __all__ = [
@@ -67,6 +68,7 @@ __all__ = [
     "ModelFamilyAdapter",
     "create_model_family_adapter",
     "NoopTranslator",
+    "ServerTranslator",
     # Exceptions
     "TranslationError",
     "TranslationConfigurationError",

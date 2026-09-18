@@ -24,7 +24,11 @@ class TextRegion:
         "language",
         "action",
         "action_reason",
+        "action_confidence",
         "translation",
+        "orientation",
+        "source_crop_bbox",
+        "style",
     )
 
     def __init__(
@@ -36,7 +40,11 @@ class TextRegion:
         language: Optional[str] = None,
         action: TextAction = TextAction.review,
         action_reason: str = "",
+        action_confidence: float = 0.0,
         translation: Optional[Dict[str, Any]] = None,
+        orientation: float = 0.0,
+        source_crop_bbox: Optional[List[int]] = None,
+        style: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.id = id
         self.source_text = source_text
@@ -45,7 +53,11 @@ class TextRegion:
         self.language = language
         self.action = action
         self.action_reason = action_reason
+        self.action_confidence = float(action_confidence)
         self.translation = translation or {}
+        self.orientation = float(orientation)
+        self.source_crop_bbox = source_crop_bbox
+        self.style = style or {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -56,7 +68,11 @@ class TextRegion:
             "language": self.language,
             "action": self.action.value if isinstance(self.action, TextAction) else self.action,
             "action_reason": self.action_reason,
+            "action_confidence": self.action_confidence,
             "translation": self.translation,
+            "orientation": self.orientation,
+            "source_crop_bbox": self.source_crop_bbox,
+            "style": self.style,
         }
 
     @classmethod

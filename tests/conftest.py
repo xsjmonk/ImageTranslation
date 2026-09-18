@@ -1,7 +1,15 @@
 """Make the src directory importable for tests without pip install."""
 
+import os
 import sys
 from pathlib import Path
+
+# Use a workspace-local temp base when the system temp dir is inaccessible.
+_workspace_tmp = Path(__file__).resolve().parent.parent / ".pytest_tmp"
+_workspace_tmp.mkdir(exist_ok=True)
+os.environ.setdefault("TMPDIR", str(_workspace_tmp))
+os.environ.setdefault("TEMP", str(_workspace_tmp))
+os.environ.setdefault("TMP", str(_workspace_tmp))
 
 # Add src/ to sys.path so `import image_translation` works
 _src = Path(__file__).resolve().parent.parent / "src"

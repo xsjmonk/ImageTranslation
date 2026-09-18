@@ -16,6 +16,8 @@ dependencies:
   - scikit-image
   - imageio
 
+  # Local manifest image processor (process-image-manifest)
+  # Used for masks, inpainting, compositing, and manifest validation.
   # Geometry and OCR-region processing
   - shapely
   - pyclipper

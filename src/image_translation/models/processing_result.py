@@ -14,10 +14,13 @@ class ProcessingResult:
 
     total: int = 0
     succeeded: int = 0
+    partial: int = 0
     failed: int = 0
     skipped: int = 0
+    conflicts: int = 0
     jobs: List[ImageJob] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def has_failures(self) -> bool:
@@ -28,9 +31,20 @@ class ProcessingResult:
         self.total += 1
 
     def summary(self) -> str:
-        return (
-            f"Processed: {self.total}  "
-            f"Succeeded: {self.succeeded}  "
-            f"Failed: {self.failed}  "
-            f"Skipped: {self.skipped}"
-        )
+        lines = [
+            (
+                f"Processed: {self.total}  "
+                f"Succeeded: {self.succeeded}  "
+                f"Partial: {self.partial}  "
+                f"Failed: {self.failed}  "
+                f"Skipped: {self.skipped}  "
+                f"Conflicts: {self.conflicts}"
+            )
+        ]
+        if self.errors:
+            lines.append("Failures:")
+            lines.extend(f"  - {err}" for err in self.errors)
+        if self.warnings:
+            lines.append("Warnings:")
+            lines.extend(f"  - {warn}" for warn in self.warnings)
+        return "\n".join(lines)

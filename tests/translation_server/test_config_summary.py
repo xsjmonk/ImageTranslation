@@ -34,11 +34,11 @@ def _models_section(active: str = "nllb") -> dict:
 
 
 class TestConfigSummary:
-    def test_repo_default_config_selects_nllb_profile(self):
+    def test_repo_default_config_selects_hymt2_profile(self):
         cfg = load_server_config(ROOT / "translation-server.config.json")
-        assert cfg.active_model == "nllb"
-        assert cfg.translation.backend == "current"
-        assert cfg.translation.model_name == "facebook/nllb-200-distilled-600M"
+        assert cfg.active_model == "hymt2"
+        assert cfg.translation.backend == "hymt2"
+        assert cfg.translation.model_name == "tencent/Hy-MT2-1.8B-FP8"
 
     def test_summary_matches_normalized_loader(self, tmp_path):
         cache = tmp_path / "cache"

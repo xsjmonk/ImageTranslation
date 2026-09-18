@@ -21,6 +21,7 @@ def enumerate_images(
     folder: Path,
     extensions: Set[str],
     recursive: bool = False,
+    exclude_suffix: str = "_processed",
 ) -> List[Path]:
     """List image files in a folder, optionally recursive.
 
@@ -37,7 +38,10 @@ def enumerate_images(
     if recursive:
         for root, dirs, files in os.walk(str(folder)):
             # Exclude _processed directories
-            dirs[:] = [d for d in dirs if not d.endswith("_processed")]
+            dirs[:] = [
+                d for d in dirs
+                if not (exclude_suffix and d.endswith(exclude_suffix))
+            ]
             root_path = Path(root)
             for fname in files:
                 if Path(fname).suffix.lower() in extensions:

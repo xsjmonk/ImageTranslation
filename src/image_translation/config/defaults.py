@@ -35,6 +35,8 @@ def build_default_config() -> AppConfig:
         ),
         translation=TranslationConfig(
             enabled=True,
+            engine="gpu",
+            style="phrase",
             source_language="zh-CN",
             target_language="en-US",
             preserve_already_target_language=True,

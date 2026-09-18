@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from ..models.text_region import TextRegion
 
@@ -16,11 +16,12 @@ class OcrEngine(ABC):
     """
 
     @abstractmethod
-    def detect(self, image) -> List[TextRegion]:
+    def detect(self, image, *, min_confidence: Optional[float] = None) -> List[TextRegion]:
         """Detect and recognize text regions in an image.
 
         Args:
-            image: Image as numpy array (BGR format from OpenCV).
+            image: Image as numpy array (BGR/BGRA format from OpenCV).
+            min_confidence: Optional override for the engine's configured threshold.
 
         Returns:
             List of TextRegion objects with text, confidence, and polygon.

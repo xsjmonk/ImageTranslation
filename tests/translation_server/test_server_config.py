@@ -91,9 +91,9 @@ class TestLoadServerConfig:
         assert cfg.server.port == 8091
         assert cfg.runtime.warmup_on_start is True
         assert cfg.translation.device == "cuda"
-        assert cfg.active_model == "nllb"
-        assert cfg.translation.backend == "current"
-        assert cfg.translation.model_name == "facebook/nllb-200-distilled-600M"
+        assert cfg.active_model == "hymt2"
+        assert cfg.translation.backend == "hymt2"
+        assert cfg.translation.model_name == "tencent/Hy-MT2-1.8B-FP8"
 
 
 class TestServerConfigValidation:

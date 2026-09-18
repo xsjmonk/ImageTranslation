@@ -39,10 +39,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # 3. Resolve and validate input
     try:
-        app_input = resolve_input(parsed)
+        app_input = resolve_input(parsed, config=config)
     except InputError as e:
         _log_error(f"Input error: {e}")
         return 1
+    except Exception as e:
+        from .utilities.output_paths import OutputPathError
+        if isinstance(e, OutputPathError):
+            _log_error(f"Output path error: {e}")
+            return 1
+        raise
 
     # 4. Log summary
     logger.info("[INFO] Input: %s", app_input.input_path)

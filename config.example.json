@@ -21,8 +21,25 @@
     "min_confidence": 0.65,
     "detect_rotation": true
   },
+  "classification": {
+    "logo_max_chars": 8,
+    "logo_aspect_ratio_min": 2.5,
+    "product_embedded_patterns": [],
+    "review_patterns": [],
+    "force_translate_patterns": [],
+    "identifier_patterns": [
+      "^https?://",
+      "^[A-Z0-9][A-Z0-9\\-_/\\.]+$",
+      "^\\d+(\\.\\d+)?\\s*(mm|cm|m|kg|g|ml|l|°|℃|%)?$"
+    ]
+  },
   "translation": {
     "enabled": true,
+    "engine": "gpu",
+    "gpu_config_path": null,
+    "server_url": "http://127.0.0.1:8091",
+    "server_timeout_seconds": 120,
+    "style": "phrase",
     "source_language": "zh-CN",
     "target_language": "en-US",
     "preserve_already_target_language": true,
@@ -41,12 +58,33 @@
     "preserve_rotation": true,
     "use_source_polygon": true,
     "allow_multiline": true,
-    "minimum_font_size": 12
+    "minimum_font_size": 12,
+    "maximum_font_size": 48,
+    "line_spacing": 1.2,
+    "clip_tolerance_pixels": 2,
+    "font_path": null,
+    "bold_font_path": null
+  },
+  "quality_control": {
+    "preserved_region_tolerance": 12.0,
+    "clip_tolerance_pixels": 2,
+    "enable_final_pixel_checks": true,
+    "enable_final_ocr": true,
+    "final_ocr_min_confidence": 0.5,
+    "final_ocr_cjk_coverage_threshold": 0.12,
+    "rendered_text_min_alpha_coverage": 0.005,
+    "inpaint_flatness_threshold": 4.0,
+    "inpaint_seam_threshold": 18.0,
+    "inpaint_spill_threshold": 8.0,
+    "max_glyph_outside_polygon_ratio": 0.05
   },
   "output": {
     "suffix": "_processed",
+    "directory": null,
     "preserve_filename": true,
+    "preserve_original": true,
     "overwrite_existing": false,
+    "allow_same_as_input": false,
     "save_metadata": true,
     "save_masks": true,
     "save_cleaned_images": true

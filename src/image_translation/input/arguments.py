@@ -30,10 +30,20 @@ def parse_arguments(argv: Optional[list[str]] = None) -> argparse.Namespace:
         dest="config_path",
         help="Path to config.json. Falls back to <repo-root>/config.json or defaults.",
     )
+    parser.add_argument(
+        "-o",
+        "--output-folder",
+        type=str,
+        default=None,
+        dest="output_folder",
+        help="Explicit output folder. Overrides config.output.directory and derived suffix.",
+    )
 
     parsed = parser.parse_args(argv)
     # Normalize to Path
     parsed.input_path = Path(parsed.input_path)
     if parsed.config_path:
         parsed.config_path = Path(parsed.config_path)
+    if parsed.output_folder:
+        parsed.output_folder = Path(parsed.output_folder)
     return parsed

@@ -562,6 +562,19 @@ function Main {
     }
 
     Write-Status 'OK' 'All environment.yml dependencies are satisfied.'
+
+    # ---- 11. Local image-processing import smoke test ----
+    Write-Status 'INFO' 'Validating local image-processing imports...'
+    $srcRoot = Join-Path $RepoRoot 'src'
+    $env:PYTHONPATH = $srcRoot
+    & $condaExe run -n $envName python -m image_translation.local_manifest --check-env
+    if ($LASTEXITCODE -ne 0) {
+        Write-Status 'ERROR' 'Local image-processing import validation failed.'
+        Write-Status 'ERROR' 'Re-run this script after fixing environment.yml or conda state.'
+        exit 1
+    }
+    Write-Status 'OK' 'Local image-processing imports validated.'
+
     Write-Status 'INFO' '=== Environment initialization complete ==='
 
     Write-Host ""

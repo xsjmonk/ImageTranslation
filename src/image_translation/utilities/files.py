@@ -38,3 +38,19 @@ def file_exists(path: Path) -> bool:
 def ensure_parent_folder(path: Path) -> None:
     """Create the parent directory of a path if it does not exist."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def bytes_equal(path_a: Path, path_b: Path) -> bool:
+    """Return True when two files contain identical bytes."""
+    return Path(path_a).read_bytes() == Path(path_b).read_bytes()
+
+
+def copy_file_atomic(source: Path, destination: Path) -> None:
+    """Copy a file byte-for-byte via a temporary sibling file."""
+    import shutil
+
+    dest = Path(destination)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")
+    shutil.copy2(source, tmp)
+    tmp.replace(dest)

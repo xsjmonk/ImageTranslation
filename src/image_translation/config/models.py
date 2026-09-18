@@ -49,6 +49,11 @@ class OcrConfig(BaseModel):
 
 class TranslationConfig(BaseModel):
     enabled: bool = True
+    engine: str = "gpu"
+    gpu_config_path: Optional[str] = None
+    server_url: str = "http://127.0.0.1:8091"
+    server_timeout_seconds: float = Field(default=120.0, gt=0)
+    style: str = "phrase"
     source_language: str = "zh-CN"
     target_language: str = "en-US"
     preserve_already_target_language: bool = True
@@ -81,6 +86,24 @@ class TranslationConfig(BaseModel):
             raise ValueError(f"translation.default_action must be one of {allowed}, got '{v}'")
         return v
 
+    @field_validator("engine")
+    @classmethod
+    def validate_engine(cls, v: str) -> str:
+        allowed = {"noop", "gpu", "server"}
+        lower = v.lower()
+        if lower not in allowed:
+            raise ValueError(f"translation.engine must be one of {allowed}, got '{v}'")
+        return lower
+
+    @field_validator("style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        allowed = {"sentence", "phrase"}
+        lower = v.lower()
+        if lower not in allowed:
+            raise ValueError(f"translation.style must be one of {allowed}, got '{v}'")
+        return lower
+
 
 class ImagingConfig(BaseModel):
     enabled: bool = True
@@ -91,10 +114,72 @@ class ImagingConfig(BaseModel):
     @field_validator("processor")
     @classmethod
     def validate_processor(cls, v: str) -> str:
-        allowed = {"hybrid", "opencv", "neural"}
+        allowed = {"hybrid", "opencv", "neural", "enhanced_opencv"}
         if v not in allowed:
             raise ValueError(f"imaging.processor must be one of {allowed}, got '{v}'")
         return v
+
+
+class ClassificationConfig(BaseModel):
+    """Conservative rules for logos, trademarks, and product-embedded text."""
+    logo_max_chars: int = Field(default=8, ge=1)
+    logo_aspect_ratio_min: float = Field(default=2.5, gt=0)
+    product_embedded_patterns: List[str] = Field(default_factory=list)
+    review_patterns: List[str] = Field(default_factory=list)
+    force_translate_patterns: List[str] = Field(default_factory=list)
+    identifier_patterns: List[str] = Field(
+        default_factory=lambda: [
+            r"^https?://",
+            r"^[A-Z0-9][A-Z0-9\-_/\.]+$",
+            r"^\d+(\.\d+)?\s*(mm|cm|m|kg|g|ml|l|°|℃|%)?$",
+        ]
+    )
+    _compiled_product: List[re.Pattern] = []
+    _compiled_review: List[re.Pattern] = []
+    _compiled_force: List[re.Pattern] = []
+    _compiled_identifier: List[re.Pattern] = []
+
+    @field_validator("product_embedded_patterns", "review_patterns", "force_translate_patterns", "identifier_patterns")
+    @classmethod
+    def validate_regex_list(cls, v: List[str]) -> List[str]:
+        for pattern in v:
+            re.compile(pattern)
+        return v
+
+    def compiled_product_patterns(self) -> List[re.Pattern]:
+        if not self._compiled_product:
+            self._compiled_product = [re.compile(p) for p in self.product_embedded_patterns]
+        return self._compiled_product
+
+    def compiled_review_patterns(self) -> List[re.Pattern]:
+        if not self._compiled_review:
+            self._compiled_review = [re.compile(p) for p in self.review_patterns]
+        return self._compiled_review
+
+    def compiled_force_patterns(self) -> List[re.Pattern]:
+        if not self._compiled_force:
+            self._compiled_force = [re.compile(p) for p in self.force_translate_patterns]
+        return self._compiled_force
+
+    def compiled_identifier_patterns(self) -> List[re.Pattern]:
+        if not self._compiled_identifier:
+            self._compiled_identifier = [re.compile(p) for p in self.identifier_patterns]
+        return self._compiled_identifier
+
+
+class QcConfig(BaseModel):
+    preserved_region_tolerance: float = Field(default=12.0, ge=0)
+    clip_tolerance_pixels: int = Field(default=2, ge=0)
+    enable_final_pixel_checks: bool = True
+    enable_final_ocr: bool = True
+    final_ocr_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    final_ocr_cjk_coverage_threshold: float = Field(default=0.12, ge=0.0, le=1.0)
+    final_ocr_overlap_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    rendered_text_min_alpha_coverage: float = Field(default=0.005, ge=0.0, le=1.0)
+    inpaint_flatness_threshold: float = Field(default=4.0, ge=0.0)
+    inpaint_seam_threshold: float = Field(default=18.0, ge=0.0)
+    inpaint_spill_threshold: float = Field(default=8.0, ge=0.0)
+    max_glyph_outside_polygon_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
 
 
 class RevisionConfig(BaseModel):
@@ -103,6 +188,11 @@ class RevisionConfig(BaseModel):
     use_source_polygon: bool = True
     allow_multiline: bool = True
     minimum_font_size: int = Field(default=12, gt=0)
+    maximum_font_size: int = Field(default=48, gt=0)
+    line_spacing: float = Field(default=1.2, gt=0)
+    clip_tolerance_pixels: int = Field(default=2, ge=0)
+    font_path: Optional[str] = None
+    bold_font_path: Optional[str] = None
 
     @field_validator("minimum_font_size")
     @classmethod
@@ -114,8 +204,11 @@ class RevisionConfig(BaseModel):
 
 class OutputConfig(BaseModel):
     suffix: str = "_processed"
+    directory: Optional[str] = None
     preserve_filename: bool = True
+    preserve_original: bool = True
     overwrite_existing: bool = False
+    allow_same_as_input: bool = False
     save_metadata: bool = True
     save_masks: bool = True
     save_cleaned_images: bool = True
@@ -146,8 +239,10 @@ class AppConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     input: InputConfig = Field(default_factory=InputConfig)
     ocr: OcrConfig = Field(default_factory=OcrConfig)
+    classification: ClassificationConfig = Field(default_factory=ClassificationConfig)
     translation: TranslationConfig = Field(default_factory=TranslationConfig)
     imaging: ImagingConfig = Field(default_factory=ImagingConfig)
     revision: RevisionConfig = Field(default_factory=RevisionConfig)
+    quality_control: QcConfig = Field(default_factory=QcConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

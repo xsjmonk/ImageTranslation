@@ -4,8 +4,8 @@
 
 **`environment.yml` is the single source of truth for all dependencies.** There is no `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile` — and there must never be.
 
-- To install/update dependencies: **only** `.\script\script\Initialize-Env.ps1`
-- To add a dependency: **edit `environment.yml`**, then re-run `script\Initialize-Env.ps1`
+- To install/update dependencies: **only** `.\script\Initialize-Env.ps1`
+- To add a dependency: **edit `environment.yml`**, then re-run `.\script\Initialize-Env.ps1`
 - **Never** run `pip install`, `pip install -e .`, or suggest any pip command
 - **Never** create a `pyproject.toml` or any packaging file
 
@@ -70,6 +70,33 @@ conda run -n dp python -c "from image_translation.translation import Translation
 The shared translation module lives in `src/image_translation/translation/`.  
 The FastAPI host lives in `src/translation_server/`.  
 **Never** let the shared module import FastAPI. FastAPI depends on the shared module, not vice versa.
+
+## Local image manifest processor
+
+Deterministic pixel work for the `translate-image` skill (masks, inpainting, compositing).
+It does **not** OCR or translate text.
+
+Initialize once:
+
+```powershell
+.\script\Initialize-Env.ps1
+```
+
+Agent-neutral command contract:
+
+```powershell
+.\script\Process-ImageManifest.ps1 check-env
+.\script\Process-ImageManifest.ps1 --manifest .\job.json [--output .\out] [--dry-run]
+```
+
+Skill wrapper (explicit repo resolution):
+
+```powershell
+D:\Drop\outlook.com\LocalBox\Code\Skills\ImageTranslation\scripts\process-image-manifest.ps1 check-env
+```
+
+Override repository path with `IMAGE_TRANSLATION_REPO` when needed.
+See `docs/local-image-tools.md` for full assumptions.
 
 ## Architecture skill (all agents)
 

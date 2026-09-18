@@ -31,3 +31,19 @@ def save_json(path: Path, data: Any, pretty: bool = True) -> None:
             indent=2 if pretty else None,
             default=str,
         )
+
+
+def save_json_atomic(path: Path, data: Any, pretty: bool = True) -> None:
+    """Write JSON atomically via a temporary sibling file."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            default=str,
+        )
+    tmp.replace(p)
